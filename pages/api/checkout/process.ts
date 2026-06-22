@@ -56,6 +56,46 @@ function sanitizeUrl(raw: string, fallback: string): string {
   }
 }
 
+type ResendErrorLike = {
+  name?: string;
+  message?: string;
+  statusCode?: number;
+};
+
+function isResendDomainNotVerifiedError(error: unknown): error is ResendErrorLike {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const resendError = error as ResendErrorLike;
+  const message = resendError.message?.toLowerCase() ?? '';
+
+  return resendError.statusCode === 403
+    && (resendError.name === 'validation_error' || message.includes('domain is not verified'));
+}
+
+function isResendTestingRecipientRestrictionError(error: unknown): error is ResendErrorLike {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const resendError = error as ResendErrorLike;
+  const message = resendError.message?.toLowerCase() ?? '';
+
+  return resendError.statusCode === 403
+    && resendError.name === 'validation_error'
+    && message.includes('you can only send testing emails to your own email address');
+}
+
+function extractTestingAllowedRecipient(message: string | undefined): string | null {
+  if (!message) {
+    return null;
+  }
+
+  const match = message.match(/\(([^\s@()]+@[^\s@()]+\.[^\s@()]+)\)/i);
+  return match?.[1]?.trim().toLowerCase() ?? null;
+}
+
 // ============================================================
 // Gerador de código PIX mockado (formato EMV simplificado)
 // ============================================================
@@ -390,14 +430,26 @@ export default async function handler(
   } else {
     try {
       const resend = new Resend(resendApiKey);
+      const senderName = process.env.RESEND_FROM_NAME?.trim() || 'SmartCheckout';
+      const intendedRecipient = customerEmail.toLowerCase().trim();
 
-      const { error: emailError } = await resend.emails.send({
-        // ⚠️  Substitua pelo seu domínio verificado no Resend.
-        // Em modo de teste, use: onboarding@resend.dev
-        from:    'SmartCheckout <noreply@smartcheckout.app>',
-        to:      [customerEmail.toLowerCase().trim()],
+      // Em dev/local, evita falha por domínio não verificado no Resend.
+      const preferredFromEmail = process.env.RESEND_FROM_EMAIL?.trim()
+        || (process.env.NODE_ENV === 'production'
+          ? 'noreply@smartcheckout.app'
+          : 'onboarding@resend.dev');
+
+      const fallbackFromEmail = process.env.RESEND_FALLBACK_FROM_EMAIL?.trim()
+        || 'onboarding@resend.dev';
+      const envTestRecipient = process.env.RESEND_TEST_RECIPIENT_EMAIL?.trim().toLowerCase() ?? '';
+
+      const buildFromAddress = (email: string): string => `${senderName} <${email}>`;
+
+      const sendEmail = async (fromEmail: string, toEmail: string) => resend.emails.send({
+        from: buildFromAddress(fromEmail),
+        to: [toEmail],
         subject: `✅ Seu acesso a "${productName}" está liberado!`,
-        html:    buildDeliveryEmailHtml(
+        html: buildDeliveryEmailHtml(
           customerName.trim(),
           productName,
           accessLink,
@@ -405,9 +457,56 @@ export default async function handler(
         ),
       });
 
+      let usedFromEmail = preferredFromEmail;
+      let usedRecipient = intendedRecipient;
+
+      if (process.env.NODE_ENV !== 'production' && envTestRecipient && envTestRecipient !== intendedRecipient) {
+        console.warn(
+          `[SmartCheckout] Ambiente de teste ativo: enviando e-mail para ${envTestRecipient} `
+          + `(destino original do checkout: ${intendedRecipient}).`,
+        );
+        usedRecipient = envTestRecipient;
+      }
+
+      let { data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient);
+
+      if (
+        emailError
+        && isResendDomainNotVerifiedError(emailError)
+        && preferredFromEmail.toLowerCase() !== fallbackFromEmail.toLowerCase()
+      ) {
+        console.warn(
+          `[SmartCheckout] Domínio do remetente (${preferredFromEmail}) não verificado no Resend. `
+          + `Tentando fallback com ${fallbackFromEmail}.`,
+        );
+
+        usedFromEmail = fallbackFromEmail;
+        ({ data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient));
+      }
+
+      if (emailError && isResendTestingRecipientRestrictionError(emailError) && process.env.NODE_ENV !== 'production') {
+        const parsedTestRecipient = extractTestingAllowedRecipient(emailError.message);
+        const testingRecipient = parsedTestRecipient || envTestRecipient;
+
+        if (testingRecipient && testingRecipient !== usedRecipient) {
+          console.warn(
+            `[SmartCheckout] Resend em modo de teste permite apenas envio para ${testingRecipient}. `
+            + `Reenviando e-mail de simulação (destino original: ${usedRecipient}).`,
+          );
+
+          usedRecipient = testingRecipient;
+          ({ data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient));
+        }
+      }
+
       if (emailError) {
         console.error('[SmartCheckout] Resend retornou erro:', emailError);
       } else {
+        console.info(
+          `[SmartCheckout] E-mail enviado via Resend para ${usedRecipient} `
+          + `(messageId: ${emailData?.id ?? 'n/a'}).`,
+        );
+
         // Marca entrega como realizada
         const { error: deliveredError } = await supabaseAdmin
           .from('orders')
