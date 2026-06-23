@@ -218,11 +218,15 @@ export default async function handler(
 
     const insertedId = Array.isArray(insertedRows) && insertedRows[0]?.id ? insertedRows[0].id : null;
 
+    console.info('[SmartCheckout] webhook_event persisted', { eventId, insertedId });
+
     // Acknowledge immediately — processing will be done by a worker endpoint.
     res.status(200).json({ ok: true, message: 'Webhook recorded' });
 
-    // If permissive mode or explicit sync processing requested, try to process this event now.
-    const syncProcessing = permissive || String(process.env.GATEWAY_WEBHOOK_SYNC_PROCESSING ?? '').toLowerCase() === 'true';
+    // If permissive mode, explicit sync processing requested, or no process secret configured, try to process this event now.
+    const syncProcessing = permissive
+      || String(process.env.GATEWAY_WEBHOOK_SYNC_PROCESSING ?? '').toLowerCase() === 'true'
+      || !process.env.GATEWAY_WEBHOOK_PROCESS_SECRET;
     if (!insertedId || !syncProcessing) {
       return;
     }
