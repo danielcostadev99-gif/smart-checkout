@@ -56,13 +56,13 @@ function extractTestingAllowedRecipient(message: string | undefined): string | n
 function buildDeliveryEmailHtml(
   customerName: string,
   productName: string,
-  accessLink: string,
+  productDownloadUrl: string,
   orderId: string,
 ): string {
   const safeName = escapeHtml(customerName);
   const safeProduct = escapeHtml(productName);
   const safeOrderId = escapeHtml(orderId);
-  const safeAccessLink = escapeHtml(accessLink);
+  const safeProductDownloadUrl = escapeHtml(productDownloadUrl);
 
   return `
 <!DOCTYPE html>
@@ -95,7 +95,7 @@ function buildDeliveryEmailHtml(
               <table cellpadding="0" cellspacing="0" style="margin:0 auto 32px;">
                 <tr>
                   <td style="background:#059669;border-radius:12px;">
-                    <a href="${safeAccessLink}" style="display:inline-block;padding:18px 44px;color:#ffffff;font-size:16px;font-weight:700;text-decoration:none;letter-spacing:0.3px;">
+                    <a href="${safeProductDownloadUrl}" style="display:inline-block;padding:18px 44px;color:#ffffff;font-size:16px;font-weight:700;text-decoration:none;letter-spacing:0.3px;">
                       ACESSAR MEU PRODUTO AGORA
                     </a>
                   </td>
@@ -103,7 +103,7 @@ function buildDeliveryEmailHtml(
               </table>
               <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:24px;">
                 <p style="margin:0 0 6px;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.08em;">Ou copie o link diretamente:</p>
-                <a href="${safeAccessLink}" style="color:#059669;font-size:13px;word-break:break-all;font-family:monospace;">${safeAccessLink}</a>
+                <a href="${safeProductDownloadUrl}" style="color:#059669;font-size:13px;word-break:break-all;font-family:monospace;">${safeProductDownloadUrl}</a>
               </div>
               <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;padding:16px;margin-bottom:28px;">
                 <p style="margin:0;font-size:13px;color:#065f46;line-height:1.7;">Numero do pedido: <strong>${safeOrderId}</strong></p>
@@ -124,7 +124,7 @@ export interface DeliveryEmailInput {
   customerName: string;
   customerEmail: string;
   productName: string;
-  accessLink: string;
+  productDownloadUrl: string;
 }
 
 export interface DeliveryEmailResult {
@@ -163,7 +163,7 @@ export async function sendDeliveryEmail(input: DeliveryEmailInput): Promise<Deli
     html: buildDeliveryEmailHtml(
       input.customerName,
       input.productName,
-      input.accessLink,
+      input.productDownloadUrl,
       input.orderId,
     ),
   });

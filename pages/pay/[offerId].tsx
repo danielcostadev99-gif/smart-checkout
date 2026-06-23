@@ -607,7 +607,7 @@ export const getServerSideProps: GetServerSideProps<PageProps> = async ({ params
       productName: String(r.productName),
       price:       Number(parsedPrice),
       description: typeof r.description === 'string' ? r.description : null,
-      accessLink:  typeof r.accessLink  === 'string' ? r.accessLink  : null,
+      productDownloadUrl: typeof r.productDownloadUrl === 'string' ? r.productDownloadUrl : null,
       imageUrl:    typeof r.imageUrl    === 'string' ? r.imageUrl    : null,
     };
   } catch {

@@ -27,15 +27,15 @@ type PaymentWebhookPayload = {
   };
 };
 
-function sanitizeUrl(raw: string, fallback: string): string {
+function sanitizeUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol === 'http:' || url.protocol === 'https:') {
       return url.toString();
     }
-    return fallback;
+    return null;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -193,8 +193,7 @@ export default async function handler(
     }
 
     let productName = 'Produto';
-    const fallbackLink = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://example.com'}/acesso`;
-    let accessLink = fallbackLink;
+    let productDownloadUrl: string | null = null;
 
     if (order.offer_id) {
       const { data: offer } = await supabaseAdmin
@@ -212,10 +211,20 @@ export default async function handler(
           productName = rawMeta.productName;
         }
 
-        if (typeof rawMeta.accessLink === 'string') {
-          accessLink = sanitizeUrl(rawMeta.accessLink, fallbackLink);
-        }
+        const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string'
+          ? rawMeta.productDownloadUrl.trim()
+          : '';
+        productDownloadUrl = sanitizeUrl(rawDownloadLink);
       }
+    }
+
+    if (!productDownloadUrl) {
+      console.error('[SmartCheckout] productDownloadUrl ausente ou invalido no metadata da oferta.', {
+        orderId: order.id,
+        offerId: order.offer_id,
+      });
+      res.status(422).json({ ok: false, message: 'Offer metadata missing valid productDownloadUrl' });
+      return;
     }
 
     const emailResult = await sendDeliveryEmail({
@@ -223,7 +232,7 @@ export default async function handler(
       customerName: order.customer_name,
       customerEmail: order.customer_email,
       productName,
-      accessLink,
+      productDownloadUrl,
     });
 
     if (emailResult.sent) {

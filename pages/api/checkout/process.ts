@@ -23,15 +23,15 @@ function isValidUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-function sanitizeUrl(raw: string, fallback: string): string {
+function sanitizeUrl(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol === 'http:' || url.protocol === 'https:') {
       return url.toString();
     }
-    return fallback;
+    return null;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
@@ -183,11 +183,15 @@ export default async function handler(
     const gatewayProvider = getCurrentProvider();
     const normalizedEmail = customerEmail.toLowerCase().trim();
     const normalizedName = customerName.trim();
-    const fallbackLink = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://example.com'}/acesso`;
-    const accessLink = sanitizeUrl(
-      typeof rawMeta.accessLink === 'string' ? rawMeta.accessLink : '',
-      fallbackLink,
-    );
+    const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string'
+      ? rawMeta.productDownloadUrl.trim()
+      : '';
+    const productDownloadUrl = sanitizeUrl(rawDownloadLink);
+
+    if (!productDownloadUrl) {
+      errorResponse(res, 422, 'Oferta sem productDownloadUrl valido no metadata.', paymentMethod);
+      return;
+    }
 
     const { data: order, error: orderError } = await supabaseAdmin
       .from('orders')
@@ -265,7 +269,7 @@ export default async function handler(
         customerName: normalizedName,
         customerEmail: normalizedEmail,
         productName,
-        accessLink,
+        productDownloadUrl,
       });
 
       if (emailResult.sent) {

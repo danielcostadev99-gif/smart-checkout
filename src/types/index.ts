@@ -14,10 +14,9 @@ export interface OfferMetadata {
   /** Descrição opcional do produto */
   description?: string | null;
   /**
-   * Link de acesso ao produto entregue no e-mail pós-pagamento.
-   * Pode ser URL de área de membros, drive, etc.
+   * Link de download/acesso do produto no metadata.
    */
-  accessLink?: string | null;
+  productDownloadUrl?: string | null;
   /** Imagem de capa opcional do produto */
   imageUrl?: string | null;
 }
