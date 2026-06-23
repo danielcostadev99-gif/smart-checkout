@@ -51,9 +51,10 @@ async function asaasFetch<T>(path: string, payload?: unknown): Promise<T> {
     throw new Error('GATEWAY_API_KEY nao configurada para o provider Asaas.');
   }
 
-  const baseUrl = process.env.ASAAS_BASE_URL?.trim() || 'https://api.asaas.com/v3';
+  const base = (process.env.ASAAS_BASE_URL?.trim() || 'https://api.asaas.com').replace(/\/+$/, '');
+  const endpoint = `${base}/v3${path.startsWith('/') ? path : `/${path}`}`;
 
-  const response = await fetch(`${baseUrl}${path}`, {
+  const response = await fetch(endpoint, {
     method: payload ? 'POST' : 'GET',
     headers: {
       accept: 'application/json',

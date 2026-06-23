@@ -109,9 +109,9 @@ async function checkGateway(provider: string): Promise<ServiceReport> {
     const timeoutMs = Number(process.env.GATEWAY_TIMEOUT_MS ?? '8000');
 
     const isAbsolute = healthPath.startsWith('http://') || healthPath.startsWith('https://');
-    const asaasBase = (process.env.ASAAS_BASE_URL?.trim() || 'https://api.asaas.com/v3').replace(/\/+$/, '');
-    const appmaxBase = (process.env.APPMAX_BASE_URL?.trim() || 'https://api.appmax.com.br/v3').replace(/\/+$/, '');
-    const base = provider === 'appmax' ? appmaxBase : asaasBase;
+    const asaasBase = (process.env.ASAAS_BASE_URL?.trim() || 'https://api.asaas.com').replace(/\/+$/, '');
+    const appmaxBase = (process.env.APPMAX_BASE_URL?.trim() || 'https://api.appmax.com.br').replace(/\/+$/, '');
+    const base = provider === 'appmax' ? `${appmaxBase}/v3` : `${asaasBase}/v3`;
     const normalizedHealthPath = healthPath.startsWith('/') ? healthPath : `/${healthPath}`;
     const url = isAbsolute ? healthPath : `${base}${normalizedHealthPath}`;
 

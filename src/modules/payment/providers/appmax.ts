@@ -26,7 +26,7 @@ function normalizeDigits(value: string): string {
 }
 
 function getAppmaxBaseUrl(): string {
-  return process.env.APPMAX_BASE_URL?.trim() || 'https://api.appmax.com.br/v3';
+  return process.env.APPMAX_BASE_URL?.trim() || 'https://api.appmax.com.br';
 }
 
 function resolvePath(path: string): string {
@@ -36,7 +36,7 @@ function resolvePath(path: string): string {
 
   const baseUrl = getAppmaxBaseUrl().replace(/\/+$/, '');
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-  return `${baseUrl}${normalizedPath}`;
+  return `${baseUrl}/v3${normalizedPath}`;
 }
 
 function mapAppmaxStatus(status: string | undefined): 'paid' | 'pending' | 'refused' {
