@@ -1,0 +1,28 @@
+name: Process Webhook Events
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # every 5 minutes
+  workflow_dispatch: {}
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call webhook processor endpoint
+        env:
+          ENDPOINT: ${{ secrets.PROCESS_WEBHOOK_ENDPOINT }}
+          SECRET: ${{ secrets.GATEWAY_WEBHOOK_PROCESS_SECRET }}
+        run: |
+          if [ -z "$ENDPOINT" ]; then
+            echo "Environment secret PROCESS_WEBHOOK_ENDPOINT is not set. Skipping."
+            exit 0
+          fi
+          echo "Triggering webhook processor at $ENDPOINT"
+          if [ -n "$SECRET" ]; then
+            curl -sS -X POST "$ENDPOINT" -H "x-webhook-process-secret: $SECRET" -H "Content-Type: application/json" -d '{}' --fail
+          else
+            # No secret provided — call endpoint without auth header (testing mode)
+            curl -sS -X POST "$ENDPOINT" -H "Content-Type: application/json" -d '{}' --fail
+          fi
+          echo "Processor triggered successfully." 
