@@ -233,11 +233,13 @@ export default async function handler(
         await supabaseAdmin.from('webhook_events').update({ status: 'processing', attempts: 1 }).eq('id', insertedId);
 
         // Load the event we just inserted
-        const { data: [ev] = [] } = await supabaseAdmin
+        const { data: evRows } = await supabaseAdmin
           .from('webhook_events')
           .select('*')
           .eq('id', insertedId)
           .limit(1);
+
+        const ev = Array.isArray(evRows) && evRows.length > 0 ? evRows[0] : null;
 
         if (!ev) {
           console.error('[SmartCheckout] Evento inserido nao encontrado para processamento imediato', { id: insertedId });
