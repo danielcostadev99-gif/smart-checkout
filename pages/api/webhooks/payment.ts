@@ -39,6 +39,22 @@ function sanitizeUrl(raw: string): string | null {
   }
 }
 
+function maskToken(value: string | undefined): string {
+  if (!value) return '';
+  try {
+    const v = value.trim();
+    if (v.length <= 10) return '****';
+    return `${v.slice(0, 4)}****${v.slice(-4)}`;
+  } catch {
+    return '****';
+  }
+}
+
+function truncateString(s: string, max = 1000): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}... (truncated)`;
+}
+
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -104,6 +120,25 @@ export default async function handler(
     res.setHeader('Allow', ['POST']);
     res.status(405).json({ ok: false, message: 'Method Not Allowed' });
     return;
+  }
+
+  const receivedAt = new Date().toISOString();
+  const clientIp = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '';
+  console.info('[SmartCheckout][Webhook] Received request', { receivedAt, ip: clientIp, method: req.method, url: req.url });
+
+  // Log presence of important headers and a masked preview of authorization
+  const hasXGatewayToken = Boolean(req.headers['x-gateway-token']);
+  const hasXWebhookToken = Boolean(req.headers['x-webhook-token']);
+  const hasAsaasAccessToken = Boolean(req.headers['asaas-access-token']);
+  const authHeader = typeof req.headers.authorization === 'string' ? maskToken(req.headers.authorization) : '';
+  console.info('[SmartCheckout][Webhook] Header presence', { hasXGatewayToken, hasXWebhookToken, hasAsaasAccessToken, authorization: authHeader });
+
+  // Body preview (truncated)
+  try {
+    const bodyPreview = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {});
+    console.info('[SmartCheckout][Webhook] Body preview', truncateString(bodyPreview, 2000));
+  } catch (err) {
+    console.info('[SmartCheckout][Webhook] Body preview unavailable', err);
   }
 
   const expectedSecret = process.env.GATEWAY_WEBHOOK_SECRET?.trim();
@@ -194,66 +229,72 @@ export default async function handler(
       return;
     }
 
-    if (order.access_delivered) {
-      res.status(200).json({ ok: true, message: 'Order already delivered' });
-      return;
-    }
+    // Acknowledge webhook immediately to avoid Asaas queue interruption.
+    res.status(200).json({ ok: true, message: 'Webhook received' });
 
-    let productName = 'Produto';
-    let productDownloadUrl: string | null = null;
-
-    if (order.offer_id) {
-      const { data: offer } = await supabaseAdmin
-        .from('offers')
-        .select('metadata')
-        .eq('id', order.offer_id)
-        .maybeSingle();
-
-      if (offer?.metadata) {
-        const rawMeta = typeof offer.metadata === 'string'
-          ? (JSON.parse(offer.metadata) as Record<string, unknown>)
-          : (offer.metadata as Record<string, unknown>);
-
-        if (typeof rawMeta.productName === 'string') {
-          productName = rawMeta.productName;
+    // Continue delivery work asynchronously (best-effort). This reduces webhook processing time.
+    (async () => {
+      try {
+        if (order.access_delivered) {
+          return;
         }
 
-        const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string'
-          ? rawMeta.productDownloadUrl.trim()
-          : '';
-        productDownloadUrl = sanitizeUrl(rawDownloadLink);
+        let productName = 'Produto';
+        let productDownloadUrl: string | null = null;
+
+        if (order.offer_id) {
+          const { data: offer } = await supabaseAdmin
+            .from('offers')
+            .select('metadata')
+            .eq('id', order.offer_id)
+            .maybeSingle();
+
+          if (offer?.metadata) {
+            const rawMeta = typeof offer.metadata === 'string'
+              ? (JSON.parse(offer.metadata) as Record<string, unknown>)
+              : (offer.metadata as Record<string, unknown>);
+
+            if (typeof rawMeta.productName === 'string') {
+              productName = rawMeta.productName;
+            }
+
+            const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string'
+              ? rawMeta.productDownloadUrl.trim()
+              : '';
+            productDownloadUrl = sanitizeUrl(rawDownloadLink);
+          }
+        }
+
+        if (!productDownloadUrl) {
+          console.error('[SmartCheckout] productDownloadUrl ausente ou invalido no metadata da oferta.', {
+            orderId: order.id,
+            offerId: order.offer_id,
+          });
+          return;
+        }
+
+        const emailResult = await sendDeliveryEmail({
+          orderId: order.id,
+          customerName: order.customer_name,
+          customerEmail: order.customer_email,
+          productName,
+          productDownloadUrl,
+        });
+
+        if (emailResult.sent) {
+          const { error: deliveredError } = await supabaseAdmin
+            .from('orders')
+            .update({ access_delivered: true })
+            .eq('id', order.id);
+
+          if (deliveredError) {
+            console.error('[SmartCheckout] Erro ao marcar access_delivered no webhook:', deliveredError);
+          }
+        }
+      } catch (err) {
+        console.error('[SmartCheckout] Erro assincrono no processamento do webhook:', err);
       }
-    }
-
-    if (!productDownloadUrl) {
-      console.error('[SmartCheckout] productDownloadUrl ausente ou invalido no metadata da oferta.', {
-        orderId: order.id,
-        offerId: order.offer_id,
-      });
-      res.status(422).json({ ok: false, message: 'Offer metadata missing valid productDownloadUrl' });
-      return;
-    }
-
-    const emailResult = await sendDeliveryEmail({
-      orderId: order.id,
-      customerName: order.customer_name,
-      customerEmail: order.customer_email,
-      productName,
-      productDownloadUrl,
-    });
-
-    if (emailResult.sent) {
-      const { error: deliveredError } = await supabaseAdmin
-        .from('orders')
-        .update({ access_delivered: true })
-        .eq('id', order.id);
-
-      if (deliveredError) {
-        console.error('[SmartCheckout] Erro ao marcar access_delivered no webhook:', deliveredError);
-      }
-    }
-
-    res.status(200).json({ ok: true, message: 'Webhook processed' });
+    })();
   } catch (error) {
     console.error('[SmartCheckout] Excecao no webhook de pagamento:', error);
     res.status(500).json({ ok: false, message: 'Internal server error' });
