@@ -290,6 +290,18 @@ export default async function handler(
           productDownloadUrl,
         });
 
+        console.info('[SmartCheckout] Delivery email result (webhook)', {
+          orderId: order.id,
+          recipient: emailResult.recipientUsed,
+          sent: emailResult.sent,
+          messageId: emailResult.messageId ?? null,
+          error: emailResult.error ? (emailResult.error instanceof Error ? emailResult.error.message : emailResult.error) : null,
+        });
+
+        if (!emailResult.sent) {
+          console.error('[SmartCheckout] Falha ao enviar e-mail de entrega via webhook', { orderId: order.id, recipient: emailResult.recipientUsed, error: emailResult.error });
+        }
+
         if (emailResult.sent) {
           const { error: deliveredError } = await supabaseAdmin
             .from('orders')
