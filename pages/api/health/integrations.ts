@@ -34,6 +34,15 @@ function getPaymentProvider(): string {
   return (process.env.PAYMENT_PROVIDER ?? 'asaas').trim().toLowerCase();
 }
 
+function parseBooleanFlag(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
 async function checkSupabase(): Promise<ServiceReport> {
   const startedAt = Date.now();
 
@@ -68,6 +77,15 @@ async function checkSupabase(): Promise<ServiceReport> {
 
 async function checkGateway(provider: string): Promise<ServiceReport> {
   const startedAt = Date.now();
+
+  if (parseBooleanFlag(process.env.PAYMENT_SIMULATION_ENABLED)) {
+    return {
+      state: 'up',
+      details: 'Modo de simulacao de pagamento ativo (PAYMENT_SIMULATION_ENABLED).',
+      latencyMs: elapsedMs(startedAt),
+    };
+  }
+
   const apiKey = process.env.GATEWAY_API_KEY?.trim();
   const healthPath = process.env.PAYMENT_PROVIDER_HEALTH_PATH?.trim();
 
