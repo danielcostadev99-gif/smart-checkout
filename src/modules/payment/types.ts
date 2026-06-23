@@ -19,6 +19,7 @@ export interface PaymentRequest {
     ccv: string;
     installments: number;
   };
+  dueDate?: string; // optional YYYY-MM-DD for gateways that require a due date (e.g. Asaas PIX)
 }
 
 export interface PaymentResponse {

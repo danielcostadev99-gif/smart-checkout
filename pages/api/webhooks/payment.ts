@@ -173,11 +173,18 @@ export default async function handler(
       return;
     }
 
+    const gatewayPayload = {
+      receivedAt: new Date().toISOString(),
+      snapshot,
+      raw: payload,
+    } as const;
+
     const { error: updateOrderError } = await supabaseAdmin
       .from('orders')
       .update({
         status: 'paid',
         external_transaction_id: snapshot.transactionId || null,
+        gateway_payload: gatewayPayload,
       })
       .eq('id', order.id);
 
