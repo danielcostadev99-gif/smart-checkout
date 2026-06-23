@@ -38,6 +38,8 @@ export type OrderStatus   = 'pending' | 'paid' | 'refused';
 export interface Order {
   id: string;
   offer_id: string | null;
+  payment_provider: string | null;
+  external_transaction_id: string | null;
   customer_name: string;
   customer_email: string;
   customer_cpf: string;
@@ -46,6 +48,7 @@ export interface Order {
   status: OrderStatus;
   total_amount: number;
   access_delivered: boolean;
+  gateway_payload?: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -73,6 +76,8 @@ export interface ProcessCheckoutResponse {
   success: boolean;
   orderId: string;
   paymentMethod: PaymentMethod;
+  paymentStatus?: OrderStatus;
+  transactionId?: string;
   productName: string;
   customerEmail: string;
   /** Código PIX Copia e Cola (somente para paymentMethod === 'pix') */
