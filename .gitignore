@@ -7,7 +7,7 @@ node_modules/
 /.next/
 /out/
 
-# Production build
+# Production build 
 /build
 
 # Environment variables — NUNCA commite estes arquivos
