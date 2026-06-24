@@ -1,10 +1,4 @@
-import { Resend } from 'resend';
-
-type ResendErrorLike = {
-  name?: string;
-  message?: string;
-  statusCode?: number;
-};
+import nodemailer from 'nodemailer';
 
 function escapeHtml(str: string): string {
   return str.replace(/[&<>\"']/g, (c) => {
@@ -17,40 +11,6 @@ function escapeHtml(str: string): string {
     };
     return map[c] ?? c;
   });
-}
-
-function isResendDomainNotVerifiedError(error: unknown): error is ResendErrorLike {
-  if (!error || typeof error !== 'object') {
-    return false;
-  }
-
-  const resendError = error as ResendErrorLike;
-  const message = resendError.message?.toLowerCase() ?? '';
-
-  return resendError.statusCode === 403
-    && (resendError.name === 'validation_error' || message.includes('domain is not verified'));
-}
-
-function isResendTestingRecipientRestrictionError(error: unknown): error is ResendErrorLike {
-  if (!error || typeof error !== 'object') {
-    return false;
-  }
-
-  const resendError = error as ResendErrorLike;
-  const message = resendError.message?.toLowerCase() ?? '';
-
-  return resendError.statusCode === 403
-    && resendError.name === 'validation_error'
-    && message.includes('you can only send testing emails to your own email address');
-}
-
-function extractTestingAllowedRecipient(message: string | undefined): string | null {
-  if (!message) {
-    return null;
-  }
-
-  const match = message.match(/\(([^\s@()]+@[^\s@()]+\.[^\s@()]+)\)/i);
-  return match?.[1]?.trim().toLowerCase() ?? null;
 }
 
 function buildDeliveryEmailHtml(
@@ -135,95 +95,56 @@ export interface DeliveryEmailResult {
 }
 
 export async function sendDeliveryEmail(input: DeliveryEmailInput): Promise<DeliveryEmailResult> {
-  const resendApiKey = process.env.RESEND_API_KEY;
+  const smtpUser = process.env.SMTP_USER?.trim();
+  const smtpPass = process.env.SMTP_APP_PASSWORD?.trim();
 
-  if (!resendApiKey) {
-    console.error('[SmartCheckout] RESEND_API_KEY nao configurada.');
+  if (!smtpUser || !smtpPass) {
+    console.error('[SmartCheckout] SMTP_USER ou SMTP_APP_PASSWORD nao configurados.');
     return {
       sent: false,
       recipientUsed: input.customerEmail.toLowerCase().trim(),
-      error: new Error('RESEND_API_KEY nao configurada.'),
+      error: new Error('SMTP_USER ou SMTP_APP_PASSWORD nao configurados.'),
     };
   }
 
-  const resend = new Resend(resendApiKey);
-  const senderName = process.env.RESEND_FROM_NAME?.trim() || 'SmartCheckout';
+  const senderName = process.env.SMTP_FROM_NAME?.trim() || 'SmartCheckout';
+  const fromAddress = `${senderName} <${smtpUser}>`;
   const intendedRecipient = input.customerEmail.toLowerCase().trim();
-  const preferredFromEmail = process.env.RESEND_FROM_EMAIL?.trim()
-    || (process.env.NODE_ENV === 'production' ? 'noreply@smartcheckout.app' : 'onboarding@resend.dev');
-  const fallbackFromEmail = process.env.RESEND_FALLBACK_FROM_EMAIL?.trim() || 'onboarding@resend.dev';
-  const envTestRecipient = process.env.RESEND_TEST_RECIPIENT_EMAIL?.trim().toLowerCase() ?? '';
 
-  const buildFromAddress = (email: string): string => `${senderName} <${email}>`;
-
-  const sendEmail = async (fromEmail: string, toEmail: string) => resend.emails.send({
-    from: buildFromAddress(fromEmail),
-    to: [toEmail],
-    subject: `Seu acesso a \"${input.productName}\" esta liberado!`,
-    html: buildDeliveryEmailHtml(
-      input.customerName,
-      input.productName,
-      input.productDownloadUrl,
-      input.orderId,
-    ),
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
   });
 
-  let usedFromEmail = preferredFromEmail;
-  let usedRecipient = intendedRecipient;
+  try {
+    const info = await transporter.sendMail({
+      from: fromAddress,
+      to: intendedRecipient,
+      subject: `Seu acesso a "${input.productName}" esta liberado!`,
+      html: buildDeliveryEmailHtml(
+        input.customerName,
+        input.productName,
+        input.productDownloadUrl,
+        input.orderId,
+      ),
+    });
 
-  if (process.env.NODE_ENV !== 'production' && envTestRecipient && envTestRecipient !== intendedRecipient) {
-    console.warn(
-      `[SmartCheckout] Ambiente de teste ativo: enviando e-mail para ${envTestRecipient} `
-      + `(destino original: ${intendedRecipient}).`,
-    );
-    usedRecipient = envTestRecipient;
-  }
+    console.info(`[SmartCheckout] E-mail enviado via Gmail SMTP para ${intendedRecipient} (messageId: ${info.messageId ?? 'n/a'}).`);
 
-  let { data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient);
-
-  if (
-    emailError
-    && isResendDomainNotVerifiedError(emailError)
-    && preferredFromEmail.toLowerCase() !== fallbackFromEmail.toLowerCase()
-  ) {
-    console.warn(
-      `[SmartCheckout] Dominio do remetente (${preferredFromEmail}) nao verificado no Resend. `
-      + `Tentando fallback com ${fallbackFromEmail}.`,
-    );
-
-    usedFromEmail = fallbackFromEmail;
-    ({ data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient));
-  }
-
-  if (emailError && isResendTestingRecipientRestrictionError(emailError) && process.env.NODE_ENV !== 'production') {
-    const parsedTestRecipient = extractTestingAllowedRecipient(emailError.message);
-    const testingRecipient = parsedTestRecipient || envTestRecipient;
-
-    if (testingRecipient && testingRecipient !== usedRecipient) {
-      console.warn(
-        `[SmartCheckout] Resend em modo de teste permite envio para ${testingRecipient}. `
-        + `Reenviando (destino original: ${usedRecipient}).`,
-      );
-
-      usedRecipient = testingRecipient;
-      ({ data: emailData, error: emailError } = await sendEmail(usedFromEmail, usedRecipient));
-    }
-  }
-
-  if (emailError) {
-    console.error('[SmartCheckout] Resend retornou erro:', emailError);
+    return {
+      sent: true,
+      recipientUsed: intendedRecipient,
+      messageId: info.messageId,
+    };
+  } catch (err) {
+    console.error('[SmartCheckout] Erro ao enviar e-mail via Gmail SMTP:', err);
     return {
       sent: false,
-      recipientUsed: usedRecipient,
-      error: emailError,
+      recipientUsed: intendedRecipient,
+      error: err,
     };
   }
-
-  console.info(`[SmartCheckout] E-mail enviado via Resend para ${usedRecipient} (messageId: ${emailData?.id ?? 'n/a'}).`);
-
-  return {
-    sent: true,
-    recipientUsed: usedRecipient,
-    messageId: emailData?.id,
-  };
 }
