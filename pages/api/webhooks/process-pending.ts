@@ -12,8 +12,9 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ProcessResponse | { ok: false; message: string }>,
 ): Promise<void> {
-  if (req.method !== 'POST') {
-    res.setHeader('Allow', ['POST']);
+  // Allow GET (Vercel Cron) and POST (manual trigger)
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    res.setHeader('Allow', ['GET', 'POST']);
     res.status(405).json({ ok: false, message: 'Method Not Allowed' });
     return;
   }
@@ -29,6 +30,14 @@ export default async function handler(
   const supabaseAdmin = getSupabaseAdmin();
 
   try {
+    // Reset events stuck in 'processing' for more than 2 minutes (serverless termination recovery)
+    const stuckCutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    await supabaseAdmin
+      .from('webhook_events')
+      .update({ status: 'pending' })
+      .eq('status', 'processing')
+      .lt('received_at', stuckCutoff);
+
     const { data: events } = await supabaseAdmin
       .from('webhook_events')
       .select('*')
