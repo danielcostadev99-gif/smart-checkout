@@ -112,6 +112,155 @@ function isApprovedEvent(eventName: string, status: string): boolean {
   return status === 'RECEIVED' || status === 'CONFIRMED' || status === 'RECEIVED_IN_CASH' || status === 'PAID';
 }
 
+type SyncProcessResult = {
+  ok: boolean;
+  message: string;
+};
+
+async function processQueuedEventById(insertedId: string): Promise<SyncProcessResult> {
+  const supabaseAdmin = getSupabaseAdmin();
+
+  // mark processing
+  const { error: markErr } = await supabaseAdmin
+    .from('webhook_events')
+    .update({ status: 'processing', attempts: 1 })
+    .eq('id', insertedId);
+
+  if (markErr) {
+    return { ok: false, message: markErr.message ?? JSON.stringify(markErr) };
+  }
+
+  // load event
+  const { data: evRows, error: loadErr } = await supabaseAdmin
+    .from('webhook_events')
+    .select('*')
+    .eq('id', insertedId)
+    .limit(1);
+
+  if (loadErr) {
+    await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: loadErr.message ?? JSON.stringify(loadErr) }).eq('id', insertedId);
+    return { ok: false, message: loadErr.message ?? JSON.stringify(loadErr) };
+  }
+
+  const ev = Array.isArray(evRows) && evRows.length > 0 ? evRows[0] : null;
+  if (!ev) {
+    await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'Inserted event not found' }).eq('id', insertedId);
+    return { ok: false, message: 'Inserted event not found' };
+  }
+
+  try {
+    const payloadNow = ev.payload as any;
+    const snapshotNow = (payloadNow.payment ?? payloadNow.data ?? payloadNow.transaction) ?? {};
+    const eventName = (payloadNow.event ?? '').toUpperCase();
+    const transactionId = snapshotNow.id ?? '';
+    const externalReference = snapshotNow.externalReference ?? '';
+    const status = (snapshotNow.status ?? '').toUpperCase();
+
+    if (!isApprovedEvent(eventName, status)) {
+      await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', insertedId);
+      return { ok: true, message: 'Event ignored (not approved)' };
+    }
+
+    // find order
+    let order: any = null;
+
+    if (transactionId) {
+      const { data } = await supabaseAdmin
+        .from('orders')
+        .select('id, offer_id, customer_name, customer_email, status, access_delivered')
+        .eq('external_transaction_id', transactionId)
+        .maybeSingle();
+
+      order = data;
+    }
+
+    if (!order && externalReference) {
+      const { data } = await supabaseAdmin
+        .from('orders')
+        .select('id, offer_id, customer_name, customer_email, status, access_delivered')
+        .eq('id', externalReference)
+        .maybeSingle();
+
+      order = data;
+    }
+
+    if (!order) {
+      await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'Order not found' }).eq('id', insertedId);
+      return { ok: false, message: 'Order not found' };
+    }
+
+    const gatewayPayloadNow = { receivedAt: new Date().toISOString(), snapshot: snapshotNow, raw: payloadNow } as const;
+
+    const { error: updateOrderError } = await supabaseAdmin
+      .from('orders')
+      .update({ status: 'paid', external_transaction_id: transactionId || null, gateway_payload: gatewayPayloadNow })
+      .eq('id', order.id);
+
+    if (updateOrderError) {
+      const orderErrMsg = updateOrderError.message ?? JSON.stringify(updateOrderError);
+      await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: orderErrMsg }).eq('id', insertedId);
+      return { ok: false, message: orderErrMsg };
+    }
+
+    if (order.access_delivered) {
+      await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', insertedId);
+      return { ok: true, message: 'Already delivered' };
+    }
+
+    // prepare and send email
+    let productName = 'Produto';
+    let productDownloadUrl: string | null = null;
+
+    if (order.offer_id) {
+      const { data: offer } = await supabaseAdmin
+        .from('offers')
+        .select('metadata')
+        .eq('id', order.offer_id)
+        .maybeSingle();
+
+      if (offer?.metadata) {
+        const rawMeta = typeof offer.metadata === 'string' ? (JSON.parse(offer.metadata) as Record<string, unknown>) : (offer.metadata as Record<string, unknown>);
+        if (typeof rawMeta.productName === 'string') productName = rawMeta.productName;
+        const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string' ? rawMeta.productDownloadUrl.trim() : '';
+        productDownloadUrl = rawDownloadLink || null;
+      }
+    }
+
+    if (!productDownloadUrl) {
+      await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'productDownloadUrl missing' }).eq('id', insertedId);
+      return { ok: false, message: 'productDownloadUrl missing' };
+    }
+
+    const emailResult = await sendDeliveryEmail({ orderId: order.id, customerName: order.customer_name, customerEmail: order.customer_email, productName, productDownloadUrl });
+
+    if (emailResult.sent) {
+      const { error: deliveredError } = await supabaseAdmin.from('orders').update({ access_delivered: true }).eq('id', order.id);
+      if (deliveredError) {
+        console.error('[SmartCheckout][Webhook] Erro ao marcar access_delivered no sync processor:', deliveredError);
+      }
+    }
+
+    await supabaseAdmin
+      .from('webhook_events')
+      .update({
+        status: emailResult.sent ? 'processed' : 'failed',
+        processed_at: new Date().toISOString(),
+        last_error: emailResult.sent ? null : String(emailResult.error ?? 'unknown'),
+      })
+      .eq('id', insertedId);
+
+    if (emailResult.sent) {
+      return { ok: true, message: 'Processed and delivered' };
+    }
+
+    return { ok: false, message: String(emailResult.error ?? 'unknown') };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : JSON.stringify(err);
+    await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: errMsg }).eq('id', insertedId);
+    return { ok: false, message: errMsg };
+  }
+}
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<WebhookResponse>,
@@ -227,7 +376,30 @@ export default async function handler(
       externalReference: snapshot.externalReference,
     });
 
-    // Acknowledge immediately — processing is handled exclusively by the process-pending worker.
+    // Try synchronous processing in-request for Hobby plans (no frequent cron).
+    // If it takes too long, keep event pending/processing and let worker pick it up later.
+    const syncTimeoutMs = Number(process.env.GATEWAY_WEBHOOK_SYNC_TIMEOUT_MS ?? 10000);
+    const syncEnabled = String(process.env.GATEWAY_WEBHOOK_SYNC_PROCESSING ?? 'true').toLowerCase() !== 'false';
+
+    if (insertedId && syncEnabled) {
+      const timeoutPromise = new Promise<SyncProcessResult>((resolve) => {
+        setTimeout(() => resolve({ ok: true, message: 'Recorded, sync timeout fallback to worker' }), syncTimeoutMs);
+      });
+
+      const syncResult = await Promise.race([processQueuedEventById(insertedId), timeoutPromise]);
+      console.info('[SmartCheckout][Webhook] Sync processing result', {
+        insertedId,
+        eventId,
+        ok: syncResult.ok,
+        message: syncResult.message,
+        timeoutMs: syncTimeoutMs,
+      });
+
+      res.status(200).json({ ok: true, message: syncResult.message });
+      return;
+    }
+
+    // Fallback: keep only queue write if sync mode disabled.
     res.status(200).json({ ok: true, message: 'Webhook recorded' });
     return;
   } catch (error) {
