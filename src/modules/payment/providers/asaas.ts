@@ -109,11 +109,8 @@ export async function processAsaasPayment(req: PaymentRequest): Promise<PaymentR
       externalReference: req.orderId,
     };
 
-    // Asaas requires a dueDate for non-credit-card payments (PIX, BOLETO).
-    if (req.paymentMethod !== 'credit_card') {
-      const due = (req as { dueDate?: string }).dueDate ?? new Date().toISOString().slice(0, 10);
-      paymentPayload.dueDate = due;
-    }
+    // Asaas requires a dueDate for all billing types (PIX, BOLETO, CREDIT_CARD).
+    paymentPayload.dueDate = (req as { dueDate?: string }).dueDate ?? new Date().toISOString().slice(0, 10);
 
     if (req.paymentMethod === 'credit_card') {
       if (!req.creditCard) {
