@@ -219,131 +219,16 @@ export default async function handler(
     const insertedId = Array.isArray(insertedRows) && insertedRows[0]?.id ? insertedRows[0].id : null;
 
     console.info('[SmartCheckout] webhook_event persisted', { eventId, insertedId });
+    console.info('[SmartCheckout][Webhook] Event queued for process-pending worker', {
+      eventId,
+      insertedId,
+      eventType,
+      transactionId: snapshot.transactionId,
+      externalReference: snapshot.externalReference,
+    });
 
-    // Acknowledge immediately — processing will be done by a worker endpoint.
+    // Acknowledge immediately — processing is handled exclusively by the process-pending worker.
     res.status(200).json({ ok: true, message: 'Webhook recorded' });
-
-    // If permissive mode, explicit sync processing requested, or no process secret configured, try to process this event now.
-    const syncProcessing = permissive
-      || String(process.env.GATEWAY_WEBHOOK_SYNC_PROCESSING ?? '').toLowerCase() === 'true'
-      || !process.env.GATEWAY_WEBHOOK_PROCESS_SECRET;
-    if (!insertedId || !syncProcessing) {
-      return;
-    }
-
-    (async () => {
-      try {
-        // Mark as processing
-        await supabaseAdmin.from('webhook_events').update({ status: 'processing', attempts: 1 }).eq('id', insertedId);
-
-        // Load the event we just inserted
-        const { data: evRows } = await supabaseAdmin
-          .from('webhook_events')
-          .select('*')
-          .eq('id', insertedId)
-          .limit(1);
-
-        const ev = Array.isArray(evRows) && evRows.length > 0 ? evRows[0] : null;
-
-        if (!ev) {
-          console.error('[SmartCheckout] Evento inserido nao encontrado para processamento imediato', { id: insertedId });
-          return;
-        }
-
-        const payloadNow = ev.payload as any;
-        const snapshotNow = (payloadNow.payment ?? payloadNow.data ?? payloadNow.transaction) ?? {};
-        const transactionId = snapshotNow.id ?? '';
-        const externalReference = snapshotNow.externalReference ?? '';
-
-        // find order
-        let order: any = null;
-
-        if (transactionId) {
-          const { data } = await supabaseAdmin
-            .from('orders')
-            .select('id, offer_id, customer_name, customer_email, status, access_delivered')
-            .eq('external_transaction_id', transactionId)
-            .maybeSingle();
-
-          order = data;
-        }
-
-        if (!order && externalReference) {
-          const { data } = await supabaseAdmin
-            .from('orders')
-            .select('id, offer_id, customer_name, customer_email, status, access_delivered')
-            .eq('id', externalReference)
-            .maybeSingle();
-
-          order = data;
-        }
-
-        if (!order) {
-          console.warn('[SmartCheckout] Nenhuma order encontrada ao processar webhook_event imediatamente.', { eventId: eventId, transactionId, externalReference });
-          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'Order not found' }).eq('id', insertedId);
-          return;
-        }
-
-        const gatewayPayloadNow = { receivedAt: new Date().toISOString(), snapshot: snapshotNow, raw: payloadNow } as const;
-
-        const { error: updateOrderError } = await supabaseAdmin
-          .from('orders')
-          .update({ status: 'paid', external_transaction_id: transactionId || null, gateway_payload: gatewayPayloadNow })
-          .eq('id', order.id);
-
-        if (updateOrderError) {
-          console.error('[SmartCheckout] Erro ao atualizar order via webhook_events immediate processing:', updateOrderError);
-          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: String(updateOrderError) }).eq('id', insertedId);
-          return;
-        }
-
-        if (order.access_delivered) {
-          await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', insertedId);
-          return;
-        }
-
-        // prepare and send email
-        let productName = 'Produto';
-        let productDownloadUrl: string | null = null;
-
-        if (order.offer_id) {
-          const { data: offer } = await supabaseAdmin
-            .from('offers')
-            .select('metadata')
-            .eq('id', order.offer_id)
-            .maybeSingle();
-
-          if (offer?.metadata) {
-            const rawMeta = typeof offer.metadata === 'string' ? (JSON.parse(offer.metadata) as Record<string, unknown>) : (offer.metadata as Record<string, unknown>);
-            if (typeof rawMeta.productName === 'string') productName = rawMeta.productName;
-            const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string' ? rawMeta.productDownloadUrl.trim() : '';
-            productDownloadUrl = rawDownloadLink || null;
-          }
-        }
-
-        if (!productDownloadUrl) {
-          console.error('[SmartCheckout] productDownloadUrl ausente ao processar webhook_event imediatamente.', { orderId: order.id, offerId: order.offer_id });
-          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'productDownloadUrl missing' }).eq('id', insertedId);
-          return;
-        }
-
-        const emailResult = await sendDeliveryEmail({ orderId: order.id, customerName: order.customer_name, customerEmail: order.customer_email, productName, productDownloadUrl });
-
-        console.info('[SmartCheckout] Delivery email result (immediate)', { orderId: order.id, recipient: emailResult.recipientUsed, sent: emailResult.sent, messageId: emailResult.messageId ?? null, error: emailResult.error ?? null });
-
-        if (emailResult.sent) {
-          const { error: deliveredError } = await supabaseAdmin.from('orders').update({ access_delivered: true }).eq('id', order.id);
-          if (deliveredError) console.error('[SmartCheckout] Erro ao marcar access_delivered no immediate processor:', deliveredError);
-        }
-
-        await supabaseAdmin.from('webhook_events').update({ status: emailResult.sent ? 'processed' : 'failed', processed_at: new Date().toISOString(), last_error: emailResult.sent ? null : String(emailResult.error ?? 'unknown') }).eq('id', insertedId);
-      } catch (err) {
-        console.error('[SmartCheckout] Erro no processamento imediato do webhook_event:', err);
-        try {
-          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: String(err) }).eq('id', insertedId);
-        } catch {}
-      }
-    })();
     return;
   } catch (error) {
     console.error('[SmartCheckout] Excecao ao registrar webhook_event:', error);

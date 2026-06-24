@@ -12,6 +12,16 @@ export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<ProcessResponse | { ok: false; message: string }>,
 ): Promise<void> {
+  const requestId = (req.headers['x-vercel-id'] as string) || '';
+  const trigger = req.method === 'GET' ? 'cron' : 'manual';
+
+  console.info('[SmartCheckout][WebhookProcessor] Request received', {
+    method: req.method,
+    url: req.url,
+    trigger,
+    requestId,
+  });
+
   // Allow GET (Vercel Cron) and POST (manual trigger)
   if (req.method !== 'POST' && req.method !== 'GET') {
     res.setHeader('Allow', ['GET', 'POST']);
@@ -20,11 +30,35 @@ export default async function handler(
   }
 
   const processSecret = process.env.GATEWAY_WEBHOOK_PROCESS_SECRET?.trim();
-  const received = (req.headers['x-webhook-process-secret'] as string) || req.headers['x-process-secret'] as string || '';
+  const cronSecret = process.env.CRON_SECRET?.trim();
 
-  if (processSecret && received !== processSecret) {
-    res.status(401).json({ ok: false, message: 'Unauthorized' });
-    return;
+  if (processSecret) {
+    const receivedHeader = (req.headers['x-webhook-process-secret'] as string) || (req.headers['x-process-secret'] as string) || '';
+    const authHeader = (req.headers['authorization'] as string) || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+    const matchesProcessSecret = receivedHeader === processSecret || bearerToken === processSecret;
+    const matchesCronSecret = cronSecret && bearerToken === cronSecret;
+
+    if (!matchesProcessSecret && !matchesCronSecret) {
+      console.warn('[SmartCheckout][WebhookProcessor] Unauthorized request (secret mismatch)', {
+        trigger,
+        hasProcessSecret: Boolean(processSecret),
+        hasCronSecret: Boolean(cronSecret),
+      });
+      res.status(401).json({ ok: false, message: 'Unauthorized' });
+      return;
+    }
+  } else if (cronSecret) {
+    const authHeader = (req.headers['authorization'] as string) || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (bearerToken !== cronSecret) {
+      console.warn('[SmartCheckout][WebhookProcessor] Unauthorized request (cron secret mismatch)', {
+        trigger,
+      });
+      res.status(401).json({ ok: false, message: 'Unauthorized' });
+      return;
+    }
   }
 
   const supabaseAdmin = getSupabaseAdmin();
@@ -32,11 +66,20 @@ export default async function handler(
   try {
     // Reset events stuck in 'processing' for more than 2 minutes (serverless termination recovery)
     const stuckCutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-    await supabaseAdmin
+    const { data: resetRows, error: resetError } = await supabaseAdmin
       .from('webhook_events')
       .update({ status: 'pending' })
       .eq('status', 'processing')
-      .lt('received_at', stuckCutoff);
+      .lt('received_at', stuckCutoff)
+      .select('id');
+
+    if (resetError) {
+      console.error('[SmartCheckout][WebhookProcessor] Failed to reset stuck events', { error: resetError });
+    } else if (Array.isArray(resetRows) && resetRows.length > 0) {
+      console.info('[SmartCheckout][WebhookProcessor] Reset stuck events to pending', {
+        count: resetRows.length,
+      });
+    }
 
     const { data: events } = await supabaseAdmin
       .from('webhook_events')
@@ -45,7 +88,13 @@ export default async function handler(
       .order('received_at', { ascending: true })
       .limit(20);
 
+    console.info('[SmartCheckout][WebhookProcessor] Pending batch loaded', {
+      count: events?.length ?? 0,
+      limit: 20,
+    });
+
     if (!events || events.length === 0) {
+      console.info('[SmartCheckout][WebhookProcessor] No pending events in this run');
       res.status(200).json({ processed: 0, failed: 0 });
       return;
     }
@@ -55,6 +104,12 @@ export default async function handler(
 
     for (const ev of events) {
       const eventId = ev.event_id ?? null;
+      console.info('[SmartCheckout][WebhookProcessor] Processing event', {
+        webhookEventRowId: ev.id,
+        eventId,
+        eventType: ev.event_type ?? null,
+        attemptsBefore: ev.attempts ?? 0,
+      });
 
       // mark processing
       const { error: markErr } = await supabaseAdmin
@@ -83,6 +138,11 @@ export default async function handler(
         if (!isApproved) {
           // mark processed but ignored
           await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', ev.id);
+          console.info('[SmartCheckout][WebhookProcessor] Event ignored (not approved)', {
+            webhookEventRowId: ev.id,
+            eventId,
+            status,
+          });
           processedCount += 1;
           continue;
         }
@@ -113,6 +173,12 @@ export default async function handler(
         if (!order) {
           console.warn('[SmartCheckout] Nenhuma order encontrada ao processar webhook_event.', { eventId, transactionId, externalReference });
           await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'Order not found' }).eq('id', ev.id);
+          console.warn('[SmartCheckout][WebhookProcessor] Event failed (order not found)', {
+            webhookEventRowId: ev.id,
+            eventId,
+            transactionId,
+            externalReference,
+          });
           failedCount += 1;
           continue;
         }
@@ -134,13 +200,19 @@ export default async function handler(
 
         if (updateOrderError) {
           console.error('[SmartCheckout] Erro ao atualizar order via webhook_events processing:', updateOrderError);
-          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: String(updateOrderError) }).eq('id', ev.id);
+          const orderErrMsg = updateOrderError.message ?? JSON.stringify(updateOrderError);
+          await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: orderErrMsg }).eq('id', ev.id);
           failedCount += 1;
           continue;
         }
 
         if (order.access_delivered) {
           await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', ev.id);
+          console.info('[SmartCheckout][WebhookProcessor] Event processed (already delivered)', {
+            webhookEventRowId: ev.id,
+            eventId,
+            orderId: order.id,
+          });
           processedCount += 1;
           continue;
         }
@@ -175,6 +247,12 @@ export default async function handler(
         if (!productDownloadUrl) {
           console.error('[SmartCheckout] productDownloadUrl ausente ao processar webhook_event.', { orderId: order.id, offerId: order.offer_id });
           await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: 'productDownloadUrl missing' }).eq('id', ev.id);
+          console.error('[SmartCheckout][WebhookProcessor] Event failed (productDownloadUrl missing)', {
+            webhookEventRowId: ev.id,
+            eventId,
+            orderId: order.id,
+            offerId: order.offer_id,
+          });
           failedCount += 1;
           continue;
         }
@@ -201,14 +279,31 @@ export default async function handler(
         }
 
         await supabaseAdmin.from('webhook_events').update({ status: 'processed', processed_at: new Date().toISOString() }).eq('id', ev.id);
+        console.info('[SmartCheckout][WebhookProcessor] Event processed successfully', {
+          webhookEventRowId: ev.id,
+          eventId,
+          orderId: order.id,
+          emailSent: emailResult.sent,
+        });
         processedCount += 1;
       } catch (err) {
         console.error('[SmartCheckout] Erro ao processar webhook_event:', err);
-        await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: String(err) }).eq('id', ev.id);
+        const errMsg = err instanceof Error ? err.message : JSON.stringify(err);
+        await supabaseAdmin.from('webhook_events').update({ status: 'failed', last_error: errMsg }).eq('id', ev.id);
+        console.error('[SmartCheckout][WebhookProcessor] Event failed with exception', {
+          webhookEventRowId: ev.id,
+          eventId,
+          errMsg,
+        });
         failedCount += 1;
       }
     }
 
+    console.info('[SmartCheckout][WebhookProcessor] Run finished', {
+      processed: processedCount,
+      failed: failedCount,
+      total: events.length,
+    });
     res.status(200).json({ processed: processedCount, failed: failedCount });
   } catch (error) {
     console.error('[SmartCheckout] Excecao no process-pending webhook:', error);
