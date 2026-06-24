@@ -1,7 +1,7 @@
 import type { NextPage } from 'next';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   CheckCircle2,
   Copy,
@@ -36,8 +36,10 @@ function validateQrCodeUrl(raw: string): string | null {
 
 const ThankYouPage: NextPage = () => {
   const router = useRouter();
-  const [copied, setCopied]   = useState(false);
-  const [isReady, setIsReady] = useState(false);
+  const [copied, setCopied]           = useState(false);
+  const [isReady, setIsReady]         = useState(false);
+  const [pixConfirmed, setPixConfirmed] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (router.isReady) setIsReady(true);
@@ -45,21 +47,56 @@ const ThankYouPage: NextPage = () => {
 
   // Leitura segura dos query params (sempre strings ou undefined)
   const rawStatus      = router.query.status;
+  const rawOrderId     = router.query.orderId;
   const rawProductName = router.query.productName;
   const rawEmail       = router.query.email;
   const rawPixCode     = router.query.pixCode;
   const rawPixQrUrl    = router.query.pixQrCodeUrl;
 
-  const status      = typeof rawStatus      === 'string' ? rawStatus      : '';
-  const productName = typeof rawProductName === 'string' ? rawProductName : '';
-  const email       = typeof rawEmail       === 'string' ? rawEmail       : '';
-  const pixCode     = typeof rawPixCode     === 'string' ? rawPixCode     : '';
-  const pixQrCodeUrl = typeof rawPixQrUrl   === 'string'
+  const initialStatus = typeof rawStatus      === 'string' ? rawStatus      : '';
+  const orderId       = typeof rawOrderId     === 'string' ? rawOrderId     : '';
+  const productName   = typeof rawProductName === 'string' ? rawProductName : '';
+  const email         = typeof rawEmail       === 'string' ? rawEmail       : '';
+  const pixCode       = typeof rawPixCode     === 'string' ? rawPixCode     : '';
+  const pixQrCodeUrl  = typeof rawPixQrUrl    === 'string'
     ? validateQrCodeUrl(rawPixQrUrl)
     : null;
 
-  const isApproved   = status === 'approved';
-  const isPixPending = status === 'pix_pending';
+  const isApproved   = initialStatus === 'approved' || pixConfirmed;
+  const isPixPending = initialStatus === 'pix_pending' && !pixConfirmed;
+
+  // Polling: verifica status do pedido a cada 4 s enquanto aguarda PIX
+  useEffect(() => {
+    if (!isReady || initialStatus !== 'pix_pending' || !orderId || pixConfirmed) return;
+
+    const POLL_INTERVAL_MS = 4000;
+    const MAX_POLLS = 75; // ~5 minutos
+    let polls = 0;
+
+    async function checkStatus(): Promise<void> {
+      polls += 1;
+      try {
+        const res = await fetch(`/api/checkout/status?orderId=${encodeURIComponent(orderId)}`);
+        if (!res.ok) return;
+        const data = await res.json() as { status?: string; accessDelivered?: boolean };
+        if (data.status === 'paid') {
+          setPixConfirmed(true);
+          if (pollRef.current) clearInterval(pollRef.current);
+        }
+      } catch {
+        // ignora erros de rede; continua tentando
+      }
+      if (polls >= MAX_POLLS && pollRef.current) {
+        clearInterval(pollRef.current);
+      }
+    }
+
+    pollRef.current = setInterval(() => { void checkStatus(); }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [isReady, initialStatus, orderId, pixConfirmed]);
 
   const handleCopy = useCallback(async (): Promise<void> => {
     if (!pixCode) return;
@@ -244,10 +281,10 @@ const ThankYouPage: NextPage = () => {
                   </div>
                 )}
 
-                {/* Aviso de aguardo */}
+                {/* Aviso de aguardo com status de polling */}
                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
                   <Clock className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-                  <div>
+                  <div className="flex-1">
                     <p className="text-sm font-semibold text-amber-800">
                       Aguardando Confirmação
                     </p>
@@ -259,6 +296,10 @@ const ThankYouPage: NextPage = () => {
                       }{' '}
                       assim que o PIX for compensado. Isso geralmente ocorre em segundos.
                     </p>
+                    <div className="flex items-center gap-1.5 mt-2">
+                      <Loader2 className="w-3 h-3 text-amber-600 animate-spin" />
+                      <span className="text-xs text-amber-600">Verificando pagamento...</span>
+                    </div>
                   </div>
                 </div>
 
