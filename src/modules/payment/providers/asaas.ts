@@ -135,6 +135,7 @@ export async function processAsaasPayment(req: PaymentRequest): Promise<PaymentR
         email: req.customer.email,
         cpfCnpj: normalizeDigits(req.customer.cpf),
         postalCode: '00000000',
+        address: 'Endereco',
         addressNumber: '0',
         phone: normalizeDigits(req.customer.phone),
       };
