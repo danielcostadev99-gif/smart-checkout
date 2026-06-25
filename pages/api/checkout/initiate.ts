@@ -93,6 +93,23 @@ export default async function handler(
     const metaPixelId = typeof rawMeta.meta_pixel_id === 'string' ? rawMeta.meta_pixel_id.trim() : '';
     const metaAccessToken = typeof rawMeta.meta_access_token === 'string' ? rawMeta.meta_access_token.trim() : '';
 
+    // Determine price from offer metadata (must not be null for DB constraint)
+    let priceFromOffer: number | null = null;
+    if (typeof rawMeta.price === 'number' && Number.isFinite(rawMeta.price)) {
+      priceFromOffer = rawMeta.price;
+    } else if (typeof rawMeta.price === 'string' && rawMeta.price.trim() !== '') {
+      const n = Number((rawMeta.price as string).replace(/[^0-9.,-]/g, '').replace(',', '.'));
+      if (Number.isFinite(n)) priceFromOffer = n;
+    }
+
+    if (priceFromOffer === null) {
+      console.error('[InitiateCheckout] Preco da oferta invalido ou ausente no metadata', { offerId, rawMeta });
+      res.status(422).json({ success: false, error: 'Oferta sem preco valido.' });
+      return;
+    }
+
+    const orderAmount = Number(Number(priceFromOffer).toFixed(2));
+
     // Insert order with minimal fields for InitiateCheckout tracking
     const { data: order, error: orderError } = await supabaseAdmin
       .from('orders')
@@ -105,7 +122,7 @@ export default async function handler(
         customer_phone: customerPhone,
         payment_method: 'pix',
         status: 'pending',
-        total_amount: null,
+        total_amount: orderAmount,
         meta_pixel_id: metaPixelId || null,
         meta_access_token: metaAccessToken || null,
         utm_source: body.utm_source ?? null,
