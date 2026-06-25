@@ -384,6 +384,15 @@ export default async function handler(
     const payload = req.body as PaymentWebhookPayload;
     const snapshot = getPaymentSnapshot(payload);
 
+    // Strict extraction from Asaas payload per request
+    const { event } = req.body as any;
+    const externalReference = (req.body as any).payment?.externalReference;
+    const status = (req.body as any).payment?.status;
+
+    // Audit logs
+    console.log('[DEBUG WEBHOOK] Evento:', event);
+    console.log('[DEBUG WEBHOOK] ID da Order (externalReference):', externalReference);
+
     // basic validation
     if (!snapshot.transactionId && !snapshot.externalReference) {
       console.warn('[SmartCheckout] Webhook sem identificador de transacao/reference.');
@@ -398,6 +407,66 @@ export default async function handler(
       });
       res.status(200).json({ ok: true, message: 'Event ignored (not approved)' });
       return;
+    }
+
+    // Try to find order by externalReference (searching by orders.id as requested)
+    try {
+      if (externalReference) {
+        const supabaseAdmin = getSupabaseAdmin();
+        const { data: foundOrder, error: findErr } = await supabaseAdmin
+          .from('orders')
+          .select('id, offer_id, customer_name, customer_email, customer_phone, customer_cpf, status, access_delivered, total_amount, meta_pixel_id, meta_access_token, utm_source, utm_campaign, utm_medium, utm_content, utm_term, fbclid, fbp, fbc, client_ip, client_user_agent, created_at')
+          .eq('id', externalReference)
+          .maybeSingle();
+
+        if (findErr) {
+          console.error('[DEBUG WEBHOOK] Erro ao buscar order por externalReference:', findErr);
+        }
+
+        console.log('[DEBUG WEBHOOK] Ordem encontrada:', foundOrder ?? null);
+
+        if (foundOrder) {
+          const pixelId = foundOrder.meta_pixel_id ?? '';
+          const accessToken = foundOrder.meta_access_token ?? '';
+
+          if (!pixelId || !accessToken) {
+            console.error('[DEBUG WEBHOOK] Pixel ou Token CAPI ausentes na order');
+          } else {
+            // Prepare orderData payload for Meta CAPI
+            const orderData = {
+              id: foundOrder.id,
+              created_at: foundOrder.created_at,
+              customer_name: foundOrder.customer_name,
+              customer_email: foundOrder.customer_email,
+              customer_phone: foundOrder.customer_phone,
+              customer_cpf: foundOrder.customer_cpf,
+              total_amount: Number(foundOrder.total_amount ?? 0),
+              utm_source: foundOrder.utm_source,
+              utm_campaign: foundOrder.utm_campaign,
+              utm_medium: foundOrder.utm_medium,
+              utm_content: foundOrder.utm_content,
+              utm_term: foundOrder.utm_term,
+              fbclid: foundOrder.fbclid,
+              fbp: foundOrder.fbp,
+              fbc: foundOrder.fbc,
+              client_ip: foundOrder.client_ip,
+              client_user_agent: foundOrder.client_user_agent,
+            } as const;
+
+            try {
+              console.log('[WEBHOOK DEBUG] Disparando Purchase para o Pixel:', pixelId);
+              await sendMetaCapiEvent('Purchase', orderData, pixelId, accessToken);
+              console.log('[DEBUG WEBHOOK] sendMetaCapiEvent completed');
+            } catch (metaErr) {
+              console.error('[DEBUG WEBHOOK] Erro ao enviar evento Meta CAPI:', metaErr);
+            }
+          }
+        }
+      } else {
+        console.log('[DEBUG WEBHOOK] externalReference ausente, pulando busca de order.');
+      }
+    } catch (err) {
+      console.error('[DEBUG WEBHOOK] Excecao durante auditoria/sync inicial:', err);
     }
 
     const supabaseAdmin = getSupabaseAdmin();
