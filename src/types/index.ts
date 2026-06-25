@@ -84,6 +84,8 @@ export interface Order {
 
 export interface ProcessCheckoutRequest extends TrackingParams {
   offerId: string;
+  /** Optional server-created order id from step 1 (initiate) */
+  orderId?: string;
   customerName: string;
   customerEmail: string;
   customerPhone: string;

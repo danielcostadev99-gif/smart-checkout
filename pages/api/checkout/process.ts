@@ -234,68 +234,115 @@ export default async function handler(
       return;
     }
 
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from('orders')
-      .insert({
-        offer_id: offerId,
-        payment_provider: gatewayProvider,
-        customer_name: normalizedName,
-        customer_email: normalizedEmail,
-        customer_cpf: customerCpf,
-        customer_phone: customerPhone,
-        payment_method: paymentMethod,
-        status: 'pending',
-        total_amount: orderAmount,
-        meta_pixel_id: metaPixelId || null,
-        meta_access_token: metaAccessToken || null,
-        utm_source: trackingParams.utm_source ?? null,
-        utm_campaign: trackingParams.utm_campaign ?? null,
-        utm_medium: trackingParams.utm_medium ?? null,
-        utm_content: trackingParams.utm_content ?? null,
-        utm_term: trackingParams.utm_term ?? null,
-        fbclid: trackingParams.fbclid ?? null,
-        fbp: trackingParams.fbp ?? null,
-        fbc: trackingParams.fbc ?? null,
-        client_ip: clientIp,
-        client_user_agent: clientUserAgent,
-        access_delivered: false,
-      })
-      .select('id, created_at')
-      .single();
+    // If the frontend already created an order (step 1), the payload may include orderId.
+    // In that case, fetch and update the order and DO NOT resend InitiateCheckout.
+    const clientOrderId = (body as any).orderId as string | undefined;
+    let orderId: string;
 
-    if (orderError || !order) {
-      console.error('[SmartCheckout] Erro ao criar pedido:', orderError);
-      errorResponse(res, 500, 'Erro interno ao registrar pedido.', paymentMethod);
-      return;
-    }
+    if (clientOrderId && typeof clientOrderId === 'string') {
+      const { data: existingOrder, error: fetchErr } = await supabaseAdmin
+        .from('orders')
+        .select('id, meta_pixel_id, meta_access_token, access_delivered, total_amount, created_at')
+        .eq('id', clientOrderId)
+        .maybeSingle();
 
-    const orderId = order.id as string;
+      if (fetchErr) {
+        console.error('[SmartCheckout] Erro ao buscar order existente:', fetchErr);
+        errorResponse(res, 500, 'Erro interno ao buscar pedido.', paymentMethod);
+        return;
+      }
 
-    try {
-      await sendMetaCapiEvent(
-        'InitiateCheckout',
-        {
-          id: orderId,
-          created_at: (order.created_at as string) ?? null,
+      if (!existingOrder) {
+        errorResponse(res, 404, 'Pedido nao encontrado (orderId).', paymentMethod);
+        return;
+      }
+
+      orderId = existingOrder.id as string;
+
+      // Update minimal fields before payment
+      const { error: updateErr } = await supabaseAdmin
+        .from('orders')
+        .update({
           customer_name: normalizedName,
           customer_email: normalizedEmail,
-          customer_phone: customerPhone,
           customer_cpf: customerCpf,
+          customer_phone: customerPhone,
+          payment_method: paymentMethod,
           total_amount: orderAmount,
-          product_name: productName,
           client_ip: clientIp,
           client_user_agent: clientUserAgent,
-          ...trackingParams,
-        },
-        metaPixelId,
-        metaAccessToken,
-      );
-    } catch (metaError) {
-      console.error('[SmartCheckout] Falha ao enviar InitiateCheckout server-side:', {
-        orderId,
-        offerId,
-        error: metaError,
-      });
+        })
+        .eq('id', orderId);
+
+      if (updateErr) {
+        console.error('[SmartCheckout] Erro ao atualizar order antes do pagamento:', updateErr);
+        errorResponse(res, 500, 'Erro interno ao atualizar pedido.', paymentMethod);
+        return;
+      }
+    } else {
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders')
+        .insert({
+          offer_id: offerId,
+          payment_provider: gatewayProvider,
+          customer_name: normalizedName,
+          customer_email: normalizedEmail,
+          customer_cpf: customerCpf,
+          customer_phone: customerPhone,
+          payment_method: paymentMethod,
+          status: 'pending',
+          total_amount: orderAmount,
+          meta_pixel_id: metaPixelId || null,
+          meta_access_token: metaAccessToken || null,
+          utm_source: trackingParams.utm_source ?? null,
+          utm_campaign: trackingParams.utm_campaign ?? null,
+          utm_medium: trackingParams.utm_medium ?? null,
+          utm_content: trackingParams.utm_content ?? null,
+          utm_term: trackingParams.utm_term ?? null,
+          fbclid: trackingParams.fbclid ?? null,
+          fbp: trackingParams.fbp ?? null,
+          fbc: trackingParams.fbc ?? null,
+          client_ip: clientIp,
+          client_user_agent: clientUserAgent,
+          access_delivered: false,
+        })
+        .select('id, created_at')
+        .single();
+
+      if (orderError || !order) {
+        console.error('[SmartCheckout] Erro ao criar pedido:', orderError);
+        errorResponse(res, 500, 'Erro interno ao registrar pedido.', paymentMethod);
+        return;
+      }
+
+      orderId = order.id as string;
+
+      try {
+        await sendMetaCapiEvent(
+          'InitiateCheckout',
+          {
+            id: orderId,
+            created_at: (order.created_at as string) ?? null,
+            customer_name: normalizedName,
+            customer_email: normalizedEmail,
+            customer_phone: customerPhone,
+            customer_cpf: customerCpf,
+            total_amount: orderAmount,
+            product_name: productName,
+            client_ip: clientIp,
+            client_user_agent: clientUserAgent,
+            ...trackingParams,
+          },
+          metaPixelId,
+          metaAccessToken,
+        );
+      } catch (metaError) {
+        console.error('[SmartCheckout] Falha ao enviar InitiateCheckout server-side:', {
+          orderId,
+          offerId,
+          error: metaError,
+        });
+      }
     }
 
     const paymentResult = await executePayment({

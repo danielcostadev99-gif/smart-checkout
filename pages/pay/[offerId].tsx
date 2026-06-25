@@ -164,6 +164,7 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata, initialTracking })
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [trackingParams, setTrackingParams] = useState<TrackingParams>(initialTracking);
+  const [orderId, setOrderId] = useState<string | null>(null);
 
   // — Dados pessoais
   const [customerName,  setCustomerName]  = useState('');
@@ -217,9 +218,43 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata, initialTracking })
     };
   });
 
-  function handleNextStep(e: FormEvent): void {
+  async function handleNextStep(e: FormEvent): Promise<void> {
     e.preventDefault();
-    setStep(2);
+
+    // Call server to create/update order and fire InitiateCheckout server-side
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      const payload = {
+        offerId: offer.id,
+        customerName,
+        customerEmail,
+        customerPhone,
+        customerCpf,
+        ...trackingParams,
+      } as const;
+
+      const resp = await fetch('/api/checkout/initiate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await resp.json();
+      if (!data || !data.success) {
+        setError(data?.error ?? 'Erro ao iniciar checkout');
+        setIsLoading(false);
+        return;
+      }
+
+      setOrderId(data.orderId ?? null);
+      setStep(2);
+    } catch (err) {
+      setError('Erro ao comunicar com o servidor. Tente novamente.');
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   async function handleSubmit(e: FormEvent): Promise<void> {
@@ -230,6 +265,7 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata, initialTracking })
     try {
       const payload: ProcessCheckoutRequest = {
         offerId:       offer.id,
+        orderId:       orderId ?? undefined,
         customerName,
         customerEmail,
         customerPhone,
