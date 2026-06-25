@@ -3,10 +3,12 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSupabaseAdmin } from '@/src/modules/database/supabaseAdmin';
 import { sendDeliveryEmail } from '@/src/modules/notifications/deliveryEmail';
 import { executePayment } from '@/src/modules/payment';
+import { sendMetaCapiEvent } from '@/src/modules/tracking/facebookCapi';
 import type {
   PaymentMethod,
   ProcessCheckoutRequest,
   ProcessCheckoutResponse,
+  TrackingParams,
 } from '@/src/types';
 
 const VALID_PAYMENT_METHODS: ReadonlySet<PaymentMethod> = new Set(['pix', 'credit_card']);
@@ -73,6 +75,40 @@ function parseCardExpiry(value: string): { month: string; year: string } | null 
 
 function getCurrentProvider(): string {
   return (process.env.PAYMENT_PROVIDER ?? 'asaas').trim().toLowerCase();
+}
+
+function normalizeNullableText(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function extractTrackingParams(body: Partial<ProcessCheckoutRequest>): TrackingParams {
+  return {
+    utm_source: normalizeNullableText(body.utm_source),
+    utm_campaign: normalizeNullableText(body.utm_campaign),
+    utm_medium: normalizeNullableText(body.utm_medium),
+    utm_content: normalizeNullableText(body.utm_content),
+    utm_term: normalizeNullableText(body.utm_term),
+    fbclid: normalizeNullableText(body.fbclid),
+    fbp: normalizeNullableText(body.fbp),
+    fbc: normalizeNullableText(body.fbc),
+  };
+}
+
+function extractClientIp(req: NextApiRequest): string | null {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  const rawValue = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  const firstIp = rawValue?.split(',')[0]?.trim();
+  return firstIp || req.socket.remoteAddress || null;
+}
+
+function extractUserAgent(req: NextApiRequest): string | null {
+  const userAgent = req.headers['user-agent'];
+  return Array.isArray(userAgent) ? userAgent[0] ?? null : userAgent ?? null;
 }
 
 export default async function handler(
@@ -149,6 +185,9 @@ export default async function handler(
 
   try {
     const supabaseAdmin = getSupabaseAdmin();
+    const trackingParams = extractTrackingParams(body);
+    const clientIp = extractClientIp(req);
+    const clientUserAgent = extractUserAgent(req);
 
     const { data: offer, error: offerError } = await supabaseAdmin
       .from('offers')
@@ -171,6 +210,8 @@ export default async function handler(
     const priceFromOffer = typeof rawMeta.price === 'number' && Number.isFinite(rawMeta.price)
       ? rawMeta.price
       : totalAmount;
+    const metaPixelId = typeof rawMeta.meta_pixel_id === 'string' ? rawMeta.meta_pixel_id.trim() : '';
+    const metaAccessToken = typeof rawMeta.meta_access_token === 'string' ? rawMeta.meta_access_token.trim() : '';
 
     if (Math.abs(priceFromOffer - totalAmount) > 0.01) {
       console.warn(
@@ -205,9 +246,21 @@ export default async function handler(
         payment_method: paymentMethod,
         status: 'pending',
         total_amount: orderAmount,
+        meta_pixel_id: metaPixelId || null,
+        meta_access_token: metaAccessToken || null,
+        utm_source: trackingParams.utm_source ?? null,
+        utm_campaign: trackingParams.utm_campaign ?? null,
+        utm_medium: trackingParams.utm_medium ?? null,
+        utm_content: trackingParams.utm_content ?? null,
+        utm_term: trackingParams.utm_term ?? null,
+        fbclid: trackingParams.fbclid ?? null,
+        fbp: trackingParams.fbp ?? null,
+        fbc: trackingParams.fbc ?? null,
+        client_ip: clientIp,
+        client_user_agent: clientUserAgent,
         access_delivered: false,
       })
-      .select('id')
+      .select('id, created_at')
       .single();
 
     if (orderError || !order) {
@@ -217,6 +270,34 @@ export default async function handler(
     }
 
     const orderId = order.id as string;
+
+    try {
+      await sendMetaCapiEvent(
+        'InitiateCheckout',
+        {
+          id: orderId,
+          created_at: (order.created_at as string) ?? null,
+          customer_name: normalizedName,
+          customer_email: normalizedEmail,
+          customer_phone: customerPhone,
+          customer_cpf: customerCpf,
+          total_amount: orderAmount,
+          product_name: productName,
+          client_ip: clientIp,
+          client_user_agent: clientUserAgent,
+          ...trackingParams,
+        },
+        metaPixelId,
+        metaAccessToken,
+      );
+    } catch (metaError) {
+      console.error('[SmartCheckout] Falha ao enviar InitiateCheckout server-side:', {
+        orderId,
+        offerId,
+        error: metaError,
+      });
+    }
+
     const paymentResult = await executePayment({
       orderId,
       amount: orderAmount,

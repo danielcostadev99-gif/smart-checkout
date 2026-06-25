@@ -1,7 +1,8 @@
 import type { GetServerSideProps, NextPage } from 'next';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
-import { useState, type FormEvent } from 'react';
+import type { ParsedUrlQuery } from 'node:querystring';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   ShieldCheck,
   Lock,
@@ -18,7 +19,14 @@ import type {
   OfferMetadata,
   ProcessCheckoutRequest,
   ProcessCheckoutResponse,
+  TrackingParams,
 } from '@/src/types';
+
+declare global {
+  interface Window {
+    fbq?: (...args: unknown[]) => void;
+  }
+}
 
 // ============================================================
 // Helpers de máscara de input
@@ -64,9 +72,36 @@ function formatCurrency(value: number): string {
 interface PageProps {
   offer: Offer;
   metadata: OfferMetadata;
+  initialTracking: TrackingParams;
 }
 
 type Step = 1 | 2;
+
+function getSingleQueryValue(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return getSingleQueryValue(value[0]);
+  }
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function extractTrackingParams(query: ParsedUrlQuery): TrackingParams {
+  return {
+    utm_source: getSingleQueryValue(query.utm_source),
+    utm_campaign: getSingleQueryValue(query.utm_campaign),
+    utm_medium: getSingleQueryValue(query.utm_medium),
+    utm_content: getSingleQueryValue(query.utm_content),
+    utm_term: getSingleQueryValue(query.utm_term),
+    fbclid: getSingleQueryValue(query.fbclid),
+    fbp: getSingleQueryValue(query.fbp),
+    fbc: getSingleQueryValue(query.fbc),
+  };
+}
 
 // ============================================================
 // Componente reutilizável de input
@@ -121,12 +156,14 @@ function InputField({
 // Página principal de Checkout
 // ============================================================
 
-const CheckoutPage: NextPage<PageProps> = ({ offer, metadata }) => {
+const CheckoutPage: NextPage<PageProps> = ({ offer, metadata, initialTracking }) => {
   const router = useRouter();
+  const initiateCheckoutTrackedRef = useRef(false);
 
   const [step, setStep]           = useState<Step>(1);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [trackingParams, setTrackingParams] = useState<TrackingParams>(initialTracking);
 
   // — Dados pessoais
   const [customerName,  setCustomerName]  = useState('');
@@ -143,6 +180,34 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata }) => {
   const [installments,  setInstallments]  = useState(1);
 
   const { price } = metadata;
+
+  useEffect(() => {
+    if (!router.isReady) {
+      return;
+    }
+
+    setTrackingParams(prev => ({
+      ...prev,
+      ...extractTrackingParams(router.query as ParsedUrlQuery),
+    }));
+  }, [router.isReady, router.query]);
+
+  useEffect(() => {
+    if (initiateCheckoutTrackedRef.current || !metadata.meta_pixel_id || typeof window === 'undefined') {
+      return;
+    }
+
+    if (typeof window.fbq !== 'function') {
+      return;
+    }
+
+    window.fbq('track', 'InitiateCheckout', {
+      content_name: metadata.productName,
+      currency: 'BRL',
+      value: price,
+    });
+    initiateCheckoutTrackedRef.current = true;
+  }, [metadata.meta_pixel_id, metadata.productName, price]);
 
   const installmentOptions = Array.from({ length: 12 }, (_, i) => {
     const n = i + 1;
@@ -171,6 +236,7 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata }) => {
         customerCpf,
         paymentMethod,
         totalAmount:   price,
+        ...trackingParams,
         ...(paymentMethod === 'credit_card' && {
           cardNumber,
           cardName,
@@ -216,6 +282,13 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata }) => {
         <title>Checkout — {metadata.productName}</title>
         <meta name="robots" content="noindex, nofollow" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {metadata.meta_pixel_id && (
+          <script
+            dangerouslySetInnerHTML={{
+              __html: `!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window, document,'script','https://connect.facebook.net/en_US/fbevents.js');fbq('init', ${JSON.stringify(metadata.meta_pixel_id)});fbq('track', 'PageView');`,
+            }}
+          />
+        )}
       </Head>
 
       <div className="min-h-screen bg-gray-50">
@@ -480,6 +553,17 @@ const CheckoutPage: NextPage<PageProps> = ({ offer, metadata }) => {
             </form>
           )}
         </main>
+        {metadata.meta_pixel_id && (
+          <noscript>
+            <img
+              height="1"
+              width="1"
+              style={{ display: 'none' }}
+              alt=""
+              src={`https://www.facebook.com/tr?id=${metadata.meta_pixel_id}&ev=PageView&noscript=1`}
+            />
+          </noscript>
+        )}
       </div>
     </>
   );
@@ -549,7 +633,7 @@ function SecurityBadge({
 // getServerSideProps — busca a oferta no Supabase
 // ============================================================
 
-export const getServerSideProps: GetServerSideProps<PageProps> = async ({ params }) => {
+export const getServerSideProps: GetServerSideProps<PageProps> = async ({ params, query }) => {
   const offerId = params?.offerId;
 
   if (typeof offerId !== 'string') {
@@ -606,6 +690,8 @@ export const getServerSideProps: GetServerSideProps<PageProps> = async ({ params
     metadata = {
       productName: String(r.productName),
       price:       Number(parsedPrice),
+      meta_pixel_id: typeof r.meta_pixel_id === 'string' ? r.meta_pixel_id : null,
+      meta_access_token: null,
       description: typeof r.description === 'string' ? r.description : null,
       productDownloadUrl: typeof r.productDownloadUrl === 'string' ? r.productDownloadUrl : null,
       imageUrl:    typeof r.imageUrl    === 'string' ? r.imageUrl    : null,
@@ -622,6 +708,7 @@ export const getServerSideProps: GetServerSideProps<PageProps> = async ({ params
         created_at: offer.created_at as string,
       },
       metadata,
+      initialTracking: extractTrackingParams(query),
     },
   };
 };

@@ -11,6 +11,10 @@ export interface OfferMetadata {
   productName: string;
   /** Preço cobrado em BRL (ex: 97.00) */
   price: number;
+  /** Pixel ID da Meta usado dinamicamente por oferta */
+  meta_pixel_id?: string | null;
+  /** Access Token da Conversion API usado dinamicamente por oferta */
+  meta_access_token?: string | null;
   /** Descrição opcional do produto */
   description?: string | null;
   /**
@@ -34,6 +38,17 @@ export interface Offer {
 export type PaymentMethod = 'pix' | 'credit_card';
 export type OrderStatus   = 'pending' | 'paid' | 'refused';
 
+export interface TrackingParams {
+  utm_source?: string | null;
+  utm_campaign?: string | null;
+  utm_medium?: string | null;
+  utm_content?: string | null;
+  utm_term?: string | null;
+  fbclid?: string | null;
+  fbp?: string | null;
+  fbc?: string | null;
+}
+
 export interface Order {
   id: string;
   offer_id: string | null;
@@ -46,6 +61,18 @@ export interface Order {
   payment_method: PaymentMethod;
   status: OrderStatus;
   total_amount: number;
+  meta_pixel_id?: string | null;
+  meta_access_token?: string | null;
+  utm_source?: string | null;
+  utm_campaign?: string | null;
+  utm_medium?: string | null;
+  utm_content?: string | null;
+  utm_term?: string | null;
+  fbclid?: string | null;
+  fbp?: string | null;
+  fbc?: string | null;
+  client_ip?: string | null;
+  client_user_agent?: string | null;
   access_delivered: boolean;
   gateway_payload?: Record<string, unknown> | null;
   created_at: string;
@@ -55,7 +82,7 @@ export interface Order {
 // Contrato da API de Checkout
 // ----------------------------------------------------------
 
-export interface ProcessCheckoutRequest {
+export interface ProcessCheckoutRequest extends TrackingParams {
   offerId: string;
   customerName: string;
   customerEmail: string;
@@ -69,6 +96,19 @@ export interface ProcessCheckoutRequest {
   cardExpiry?: string;
   cardCvv?: string;
   installments?: number;
+}
+
+export interface MetaCapiOrderData extends TrackingParams {
+  id: string;
+  created_at?: string | null;
+  customer_name?: string | null;
+  customer_email?: string | null;
+  customer_phone?: string | null;
+  customer_cpf?: string | null;
+  total_amount?: number | null;
+  product_name?: string | null;
+  client_ip?: string | null;
+  client_user_agent?: string | null;
 }
 
 export interface ProcessCheckoutResponse {

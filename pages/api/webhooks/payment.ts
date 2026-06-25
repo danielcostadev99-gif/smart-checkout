@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 import { getSupabaseAdmin } from '@/src/modules/database/supabaseAdmin';
 import { sendDeliveryEmail } from '@/src/modules/notifications/deliveryEmail';
+import { sendMetaCapiEvent } from '@/src/modules/tracking/facebookCapi';
 
 type WebhookResponse = {
   ok: boolean;
@@ -167,7 +168,7 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     if (transactionId) {
       const { data } = await supabaseAdmin
         .from('orders')
-        .select('id, offer_id, customer_name, customer_email, status, access_delivered')
+        .select('id, offer_id, customer_name, customer_email, customer_phone, customer_cpf, status, access_delivered, total_amount, meta_pixel_id, meta_access_token, utm_source, utm_campaign, utm_medium, utm_content, utm_term, fbclid, fbp, fbc, client_ip, client_user_agent, created_at')
         .eq('external_transaction_id', transactionId)
         .maybeSingle();
 
@@ -177,7 +178,7 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     if (!order && externalReference) {
       const { data } = await supabaseAdmin
         .from('orders')
-        .select('id, offer_id, customer_name, customer_email, status, access_delivered')
+        .select('id, offer_id, customer_name, customer_email, customer_phone, customer_cpf, status, access_delivered, total_amount, meta_pixel_id, meta_access_token, utm_source, utm_campaign, utm_medium, utm_content, utm_term, fbclid, fbp, fbc, client_ip, client_user_agent, created_at')
         .eq('id', externalReference)
         .maybeSingle();
 
@@ -190,6 +191,7 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     }
 
     const gatewayPayloadNow = { receivedAt: new Date().toISOString(), snapshot: snapshotNow, raw: payloadNow } as const;
+    const shouldSendPurchaseEvent = order.status !== 'paid';
 
     const { error: updateOrderError } = await supabaseAdmin
       .from('orders')
@@ -232,6 +234,41 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     }
 
     const emailResult = await sendDeliveryEmail({ orderId: order.id, customerName: order.customer_name, customerEmail: order.customer_email, productName, productDownloadUrl });
+
+    if (shouldSendPurchaseEvent) {
+      try {
+        await sendMetaCapiEvent(
+          'Purchase',
+          {
+            id: order.id,
+            created_at: order.created_at,
+            customer_name: order.customer_name,
+            customer_email: order.customer_email,
+            customer_phone: order.customer_phone,
+            customer_cpf: order.customer_cpf,
+            total_amount: Number(order.total_amount ?? 0),
+            product_name: productName,
+            utm_source: order.utm_source,
+            utm_campaign: order.utm_campaign,
+            utm_medium: order.utm_medium,
+            utm_content: order.utm_content,
+            utm_term: order.utm_term,
+            fbclid: order.fbclid,
+            fbp: order.fbp,
+            fbc: order.fbc,
+            client_ip: order.client_ip,
+            client_user_agent: order.client_user_agent,
+          },
+          order.meta_pixel_id ?? '',
+          order.meta_access_token ?? '',
+        );
+      } catch (metaError) {
+        console.error('[SmartCheckout][Webhook] Falha ao enviar Purchase sync:', {
+          orderId: order.id,
+          error: metaError,
+        });
+      }
+    }
 
     if (emailResult.sent) {
       const { error: deliveredError } = await supabaseAdmin.from('orders').update({ access_delivered: true }).eq('id', order.id);
