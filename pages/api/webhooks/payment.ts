@@ -165,10 +165,41 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     // find order
     let order: any = null;
 
+    // When the webhook event is strictly PAYMENT_RECEIVED or PAYMENT_CONFIRMED,
+    // request the Meta columns first so they arrive in the expected order.
+    const pixelFirst = eventName === 'PAYMENT_RECEIVED' || eventName === 'PAYMENT_CONFIRMED';
+
+    const baseFields = [
+      'id',
+      'offer_id',
+      'customer_name',
+      'customer_email',
+      'customer_phone',
+      'customer_cpf',
+      'status',
+      'access_delivered',
+      'total_amount',
+      'utm_source',
+      'utm_campaign',
+      'utm_medium',
+      'utm_content',
+      'utm_term',
+      'fbclid',
+      'fbp',
+      'fbc',
+      'client_ip',
+      'client_user_agent',
+      'created_at',
+    ];
+
+    const selectFields = pixelFirst
+      ? ['meta_pixel_id', 'meta_access_token', ...baseFields].join(', ')
+      : [...baseFields, 'meta_pixel_id', 'meta_access_token'].join(', ');
+
     if (transactionId) {
       const { data } = await supabaseAdmin
         .from('orders')
-        .select('id, offer_id, customer_name, customer_email, customer_phone, customer_cpf, status, access_delivered, total_amount, meta_pixel_id, meta_access_token, utm_source, utm_campaign, utm_medium, utm_content, utm_term, fbclid, fbp, fbc, client_ip, client_user_agent, created_at')
+        .select(selectFields)
         .eq('external_transaction_id', transactionId)
         .maybeSingle();
 
@@ -178,7 +209,7 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     if (!order && externalReference) {
       const { data } = await supabaseAdmin
         .from('orders')
-        .select('id, offer_id, customer_name, customer_email, customer_phone, customer_cpf, status, access_delivered, total_amount, meta_pixel_id, meta_access_token, utm_source, utm_campaign, utm_medium, utm_content, utm_term, fbclid, fbp, fbc, client_ip, client_user_agent, created_at')
+        .select(selectFields)
         .eq('id', externalReference)
         .maybeSingle();
 
@@ -237,8 +268,12 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
 
     if (shouldSendPurchaseEvent) {
       try {
-        await sendMetaCapiEvent(
-          'Purchase',
+        const pixelId = order.meta_pixel_id ?? '';
+        const accessToken = order.meta_access_token ?? '';
+
+        console.log('[WEBHOOK DEBUG] Disparando Purchase para o Pixel:', pixelId);
+
+        await sendMetaCapiEvent('Purchase',
           {
             id: order.id,
             created_at: order.created_at,
@@ -259,8 +294,8 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
             client_ip: order.client_ip,
             client_user_agent: order.client_user_agent,
           },
-          order.meta_pixel_id ?? '',
-          order.meta_access_token ?? '',
+          pixelId,
+          accessToken,
         );
       } catch (metaError) {
         console.error('[SmartCheckout][Webhook] Falha ao enviar Purchase sync:', {
