@@ -392,12 +392,59 @@ export default async function handler(
     }
 
     if (paymentResult.status === 'paid') {
+      // Default delivery link is the Drive link from the offer metadata
+      let deliveryLink = productDownloadUrl;
+
+      // Check if there's a product with the same id as the offer (product_id === offer_id)
+      const { data: product, error: productError } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('id', offerId)
+        .maybeSingle();
+
+      if (productError) {
+        console.error('[SmartCheckout] Erro ao buscar produto correspondente:', productError);
+      }
+
+      if (product) {
+        // If a corresponding product exists, switch delivery to MemberKit URL
+        deliveryLink = (process.env.NEXT_PUBLIC_MEMBERKIT_URL ?? 'https://memberkit.vercel.app/').trim();
+
+        try {
+          // Find the buyer in auth.users by email
+          const { data: user } = await supabaseAdmin
+            .from('auth.users')
+            .select('id')
+            .eq('email', normalizedEmail)
+            .maybeSingle();
+
+          if (user && user.id) {
+            // Upsert user access, scoping conflict to user_id,product_id
+            const { error: upsertError } = await supabaseAdmin
+              .from('user_access')
+              .upsert([
+                {
+                  user_id: user.id,
+                  product_id: product.id,
+                  status: 'active',
+                },
+              ], { onConflict: 'user_id,product_id' });
+
+            if (upsertError) {
+              console.error('[SmartCheckout] Erro ao upsert na tabela user_access:', upsertError);
+            }
+          }
+        } catch (err) {
+          console.error('[SmartCheckout] Erro inesperado ao provisionar acesso no MemberKit:', err);
+        }
+      }
+
       const emailResult = await sendDeliveryEmail({
         orderId,
         customerName: normalizedName,
         customerEmail: normalizedEmail,
         productName,
-        productDownloadUrl,
+        productDownloadUrl: deliveryLink,
       });
 
       if (emailResult.sent) {

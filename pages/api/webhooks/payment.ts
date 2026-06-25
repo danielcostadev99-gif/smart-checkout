@@ -245,17 +245,60 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
     let productDownloadUrl: string | null = null;
 
     if (order.offer_id) {
-      const { data: offer } = await supabaseAdmin
+      const { data: offer, error: offerErr } = await supabaseAdmin
         .from('offers')
         .select('metadata')
         .eq('id', order.offer_id)
         .maybeSingle();
+
+      if (offerErr) {
+        console.error('[SmartCheckout][Webhook] Erro ao buscar offer metadata:', offerErr);
+      }
 
       if (offer?.metadata) {
         const rawMeta = typeof offer.metadata === 'string' ? (JSON.parse(offer.metadata) as Record<string, unknown>) : (offer.metadata as Record<string, unknown>);
         if (typeof rawMeta.productName === 'string') productName = rawMeta.productName;
         const rawDownloadLink = typeof rawMeta.productDownloadUrl === 'string' ? rawMeta.productDownloadUrl.trim() : '';
         productDownloadUrl = rawDownloadLink || null;
+      }
+
+      // Check for corresponding product (product.id === offer_id)
+      const { data: product, error: productErr } = await supabaseAdmin
+        .from('products')
+        .select('id')
+        .eq('id', order.offer_id)
+        .maybeSingle();
+
+      if (productErr) {
+        console.error('[SmartCheckout][Webhook] Erro ao buscar produto correspondente:', productErr);
+      }
+
+      if (product) {
+        // If product exists, override delivery to MemberKit URL
+        productDownloadUrl = (process.env.NEXT_PUBLIC_MEMBERKIT_URL ?? 'https://memberkit.vercel.app/').trim();
+
+        try {
+          // Find buyer in auth.users by email
+          const { data: user } = await supabaseAdmin
+            .from('auth.users')
+            .select('id')
+            .eq('email', order.customer_email)
+            .maybeSingle();
+
+          if (user && user.id) {
+            const { error: upsertError } = await supabaseAdmin
+              .from('user_access')
+              .upsert([
+                { user_id: user.id, product_id: product.id, status: 'active' },
+              ], { onConflict: 'user_id,product_id' });
+
+            if (upsertError) {
+              console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela user_access:', upsertError);
+            }
+          }
+        } catch (err) {
+          console.error('[SmartCheckout][Webhook] Erro inesperado ao provisionar acesso no MemberKit:', err);
+        }
       }
     }
 
