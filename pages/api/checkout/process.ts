@@ -454,7 +454,7 @@ export default async function handler(
                   product_id: product.id,
                   status: 'active',
                 },
-              ], { onConflict: 'user_product_unique' });
+              ], { onConflict: 'user_id,product_id' });
 
             if (upsertError) {
               console.error('[SmartCheckout] Erro ao upsert na tabela user_access:', upsertError);

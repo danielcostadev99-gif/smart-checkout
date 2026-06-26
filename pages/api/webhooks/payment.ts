@@ -317,7 +317,7 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
               .from('user_access')
               .upsert([
                 { user_id, product_id: product.id, status: 'active' },
-              ], { onConflict: 'user_product_unique' });
+              ], { onConflict: 'user_id,product_id' });
 
             if (upsertError) {
               console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela user_access:', upsertError);
