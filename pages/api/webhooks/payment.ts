@@ -293,11 +293,10 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
             user_id = existingUser.id;
           } else {
             try {
-              const tempPassword = Math.random().toString(36).substring(2, 10);
               const { data: newUser, error: createError } = await (supabaseAdmin.auth.admin as any).createUser({
                 email: normalizedEmail,
                 email_confirm: true,
-                password: tempPassword,
+                password: '1234' // Senha padrão exigida pelo fluxo de login do MemberKit
               });
 
               if (createError) {
