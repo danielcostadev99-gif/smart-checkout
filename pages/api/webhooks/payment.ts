@@ -278,39 +278,34 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
         productDownloadUrl = (process.env.NEXT_PUBLIC_MEMBERKIT_URL ?? 'https://memberkit.vercel.app/').trim();
 
         try {
-          // Ensure we have a user_id: lookup by email in auth.users, create if missing
+          // Ensure we have a user_id: list admin users and find by email, create if missing
           let user_id: string | null = null;
 
-          const { data: foundUser, error: findUserErr } = await supabaseAdmin
-            .from('auth.users')
-            .select('id')
-            .eq('email', order.customer_email)
-            .maybeSingle();
-
-          if (findUserErr) {
-            console.error('[SmartCheckout][Webhook] Erro ao buscar auth.users por email:', findUserErr);
+          const { data: adminUsers, error: listError } = await (supabaseAdmin.auth.admin as any).listUsers();
+          if (listError) {
+            console.error('[SmartCheckout][Webhook] Erro ao listar usuarios admin:', listError);
           }
 
-          if (foundUser && (foundUser as any).id) {
-            user_id = (foundUser as any).id;
+          const normalizedEmail = (order.customer_email ?? '').toLowerCase().trim();
+          const existingUser = adminUsers?.users?.find((u: any) => (u.email ?? '').toLowerCase() === normalizedEmail);
+
+          if (existingUser && existingUser.id) {
+            user_id = existingUser.id;
           } else {
             try {
-              const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-              const createRes: any = await (supabaseAdmin.auth.admin as any).createUser({
-                email: order.customer_email,
-                password: tempPassword,
+              const tempPassword = Math.random().toString(36).substring(2, 10);
+              const { data: newUser, error: createError } = await (supabaseAdmin.auth.admin as any).createUser({
+                email: normalizedEmail,
                 email_confirm: true,
+                password: tempPassword,
               });
 
-              const createdUser = createRes?.data?.user ?? createRes?.user ?? createRes?.data ?? null;
-              const newUserId = createdUser?.id ?? null;
-
-              if (newUserId) {
-                user_id = newUserId;
-              } else if (createRes?.id) {
-                user_id = createRes.id as string;
+              if (createError) {
+                console.error('[SmartCheckout][Webhook] Erro ao criar usuario admin:', createError);
+              } else if (newUser?.user?.id) {
+                user_id = newUser.user.id;
               } else {
-                console.error('[SmartCheckout][Webhook] Nao foi possivel obter id do usuario criado:', createRes);
+                console.error('[SmartCheckout][Webhook] Resposta inesperada ao criar usuario admin:', newUser);
               }
             } catch (createErr) {
               console.error('[SmartCheckout][Webhook] Erro ao criar usuario admin no Supabase:', createErr);
@@ -319,13 +314,13 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
 
           if (user_id) {
             const { error: upsertError } = await supabaseAdmin
-              .from('user_access')
+              .from('public.user_access')
               .upsert([
                 { user_id, product_id: product.id, status: 'active' },
               ], { onConflict: 'user_product_unique' });
 
             if (upsertError) {
-              console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela user_access:', upsertError);
+              console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela public.user_access:', upsertError);
             }
           }
         } catch (err) {

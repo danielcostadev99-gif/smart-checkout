@@ -411,50 +411,43 @@ export default async function handler(
         deliveryLink = (process.env.NEXT_PUBLIC_MEMBERKIT_URL ?? 'https://memberkit.vercel.app/').trim();
 
         try {
-          // Ensure we have a user_id: lookup by email in auth.users, create if missing
+          // Ensure we have a user_id: list admin users and find by email, create if missing
           let user_id: string | null = null;
 
-          const { data: foundUser, error: findUserError } = await supabaseAdmin
-            .from('auth.users')
-            .select('id')
-            .eq('email', normalizedEmail)
-            .maybeSingle();
-
-          if (findUserError) {
-            console.error('[SmartCheckout] Erro ao buscar auth.users por email:', findUserError);
+          const { data: adminUsers, error: listError } = await (supabaseAdmin.auth.admin as any).listUsers();
+          if (listError) {
+            console.error('[SmartCheckout] Erro ao listar usuarios admin:', listError);
           }
 
-          if (foundUser && (foundUser as any).id) {
-            user_id = (foundUser as any).id;
+          const existingUser = adminUsers?.users?.find((u: any) => (u.email ?? '').toLowerCase() === normalizedEmail);
+
+          if (existingUser && existingUser.id) {
+            user_id = existingUser.id;
           } else {
             try {
-              const tempPassword = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-              const createRes: any = await (supabaseAdmin.auth.admin as any).createUser({
+              const tempPassword = Math.random().toString(36).substring(2, 10);
+              const { data: newUser, error: createError } = await (supabaseAdmin.auth.admin as any).createUser({
                 email: normalizedEmail,
-                password: tempPassword,
                 email_confirm: true,
+                password: tempPassword,
               });
 
-              // supabase-js may return the created user in different shapes; try common paths
-              const createdUser = createRes?.data?.user ?? createRes?.user ?? createRes?.data ?? null;
-              const newUserId = createdUser?.id ?? null;
-
-              if (newUserId) {
-                user_id = newUserId;
-              } else if (createRes?.id) {
-                user_id = createRes.id as string;
+              if (createError) {
+                console.error('[SmartCheckout] Erro ao criar usuario admin:', createError);
+              } else if (newUser?.user?.id) {
+                user_id = newUser.user.id;
               } else {
-                console.error('[SmartCheckout] Nao foi possivel obter id do usuario criado:', createRes);
+                console.error('[SmartCheckout] Resposta inesperada ao criar usuario admin:', newUser);
               }
             } catch (createErr) {
               console.error('[SmartCheckout] Erro ao criar usuario admin no Supabase:', createErr);
             }
           }
 
-          // If we have a user_id, upsert access into user_access using the service role client
+          // If we have a user_id, upsert access into public.user_access using the service role client
           if (user_id) {
             const { error: upsertError } = await supabaseAdmin
-              .from('user_access')
+              .from('public.user_access')
               .upsert([
                 {
                   user_id,
@@ -464,7 +457,7 @@ export default async function handler(
               ], { onConflict: 'user_product_unique' });
 
             if (upsertError) {
-              console.error('[SmartCheckout] Erro ao upsert na tabela user_access:', upsertError);
+              console.error('[SmartCheckout] Erro ao upsert na tabela public.user_access:', upsertError);
             }
           }
         } catch (err) {
