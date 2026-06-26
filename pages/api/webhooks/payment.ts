@@ -314,13 +314,13 @@ async function processQueuedEventById(insertedId: string): Promise<SyncProcessRe
 
           if (user_id) {
             const { error: upsertError } = await supabaseAdmin
-              .from('public.user_access')
+              .from('user_access')
               .upsert([
                 { user_id, product_id: product.id, status: 'active' },
               ], { onConflict: 'user_product_unique' });
 
             if (upsertError) {
-              console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela public.user_access:', upsertError);
+              console.error('[SmartCheckout][Webhook] Erro ao upsert na tabela user_access:', upsertError);
             }
           }
         } catch (err) {

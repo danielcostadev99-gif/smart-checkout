@@ -447,7 +447,7 @@ export default async function handler(
           // If we have a user_id, upsert access into public.user_access using the service role client
           if (user_id) {
             const { error: upsertError } = await supabaseAdmin
-              .from('public.user_access')
+              .from('user_access')
               .upsert([
                 {
                   user_id,
@@ -457,7 +457,7 @@ export default async function handler(
               ], { onConflict: 'user_product_unique' });
 
             if (upsertError) {
-              console.error('[SmartCheckout] Erro ao upsert na tabela public.user_access:', upsertError);
+              console.error('[SmartCheckout] Erro ao upsert na tabela user_access:', upsertError);
             }
           }
         } catch (err) {
